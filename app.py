@@ -1,7 +1,5 @@
 import streamlit as st
-import sqlite3
-from datetime import date
-from pathlib import Path
+import requests as _req
 
 st.set_page_config(page_title="A股 T+0 辅助计算器", layout="wide")
 
@@ -44,73 +42,48 @@ st.title("📊 A股 T+0 辅助计算器")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SQLite 本地存储
+# 后端 API 调用
 # ══════════════════════════════════════════════════════════════════════════════
-DB_PATH = Path(__file__).parent / "trading.db"
+_API     = st.secrets.get("BACKEND_URL", "http://localhost:8000")
+_TIMEOUT = 8   # 秒
 
-def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row   # 让结果可按列名访问
-    return conn
+_ERR_CONN = "服务暂时不可用，请稍后重试"   # 统一连接失败提示
 
-def _init_db():
-    with _conn() as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS trade_records (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                trade_type   TEXT,
-                stock_name   TEXT,
-                buy_price    REAL,
-                sell_price   REAL,
-                quantity     INTEGER,
-                gross_profit REAL,
-                total_fee    REAL,
-                net_profit   REAL,
-                new_avg_cost REAL,
-                notes        TEXT
-            )
-        """)
-        c.commit()
 
-_init_db()   # 启动时建表，已存在则跳过
+def _unavailable(e: Exception) -> bool:
+    """判断是否为连接类错误"""
+    return isinstance(e, (_req.exceptions.ConnectionError,
+                          _req.exceptions.Timeout))
 
 
 def db_insert(row: dict) -> tuple[bool, str]:
-    """写入 trade_records，返回 (成功, 错误信息)"""
+    """POST /trade/save，返回 (成功, 错误信息)"""
     try:
-        cols   = ", ".join(row.keys())
-        marks  = ", ".join("?" * len(row))
-        with _conn() as c:
-            c.execute(f"INSERT INTO trade_records ({cols}) VALUES ({marks})",
-                      list(row.values()))
-            c.commit()
+        resp = _req.post(f"{_API}/trade/save", json=row, timeout=_TIMEOUT)
+        resp.raise_for_status()
         return True, ""
     except Exception as e:
-        return False, str(e)
+        return False, _ERR_CONN if _unavailable(e) else str(e)
 
 
 def db_load_all() -> tuple[list, str]:
-    """读取全部记录（按时间倒序），返回 (records, 错误信息)"""
+    """GET /trade/list，返回 (records, 错误信息)"""
     try:
-        with _conn() as c:
-            rows = c.execute(
-                "SELECT * FROM trade_records ORDER BY created_at DESC"
-            ).fetchall()
-        return [dict(r) for r in rows], ""
+        resp = _req.get(f"{_API}/trade/list", timeout=_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json(), ""
     except Exception as e:
-        return [], str(e)
+        return [], _ERR_CONN if _unavailable(e) else str(e)
 
 
 def db_clear_all() -> tuple[bool, str]:
-    """删除 trade_records 所有行，返回 (成功, 错误信息)"""
+    """DELETE /trade/clear，返回 (成功, 错误信息)"""
     try:
-        with _conn() as c:
-            c.execute("DELETE FROM trade_records")
-            c.commit()
+        resp = _req.delete(f"{_API}/trade/clear", timeout=_TIMEOUT)
+        resp.raise_for_status()
         return True, ""
     except Exception as e:
-        return False, str(e)
+        return False, _ERR_CONN if _unavailable(e) else str(e)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -186,7 +159,7 @@ def save_section(key_prefix: str, trade_type: str, base_row: dict):
         }
         ok, err = db_insert(row)
         if ok:
-            st.toast("✅ 已保存到本地数据库", icon="📌")
+            st.toast("✅ 已保存到历史记录", icon="📌")
             # 同步侧边栏计数
             st.session_state.setdefault("today_count", 0)
             st.session_state["today_count"] += 1
@@ -607,7 +580,7 @@ with tab4:
 
     if err:
         st.error(f"读取数据失败：{err}")
-        st.info(f"数据库路径：{DB_PATH}")
+        st.info("请确认后端服务已启动：uvicorn main:app --reload --port 8000")
     elif not records:
         st.info("暂无历史记录。完成一次计算后点击「📌 保存本次记录」即可保存。")
     else:
