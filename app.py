@@ -102,6 +102,17 @@ def db_load_all() -> tuple[list, str]:
         return [], str(e)
 
 
+def db_clear_all() -> tuple[bool, str]:
+    """删除 trade_records 所有行，返回 (成功, 错误信息)"""
+    try:
+        with _conn() as c:
+            c.execute("DELETE FROM trade_records")
+            c.commit()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 工具函数
 # ══════════════════════════════════════════════════════════════════════════════
@@ -564,9 +575,33 @@ with tab2:
 with tab4:
     st.subheader("📋 历史操作记录")
 
-    h_col, r_col = st.columns([5, 1])
+    # ── 顶栏：刷新 + 清空按钮
+    h_col, r_col, c_col = st.columns([4, 1, 1])
     with r_col:
-        refresh = st.button("🔄 刷新", use_container_width=True)
+        st.button("🔄 刷新", use_container_width=True)
+    with c_col:
+        if st.button("🗑️ 清空记录", use_container_width=True):
+            st.session_state["confirm_clear"] = True
+
+    # ── 二次确认区
+    if st.session_state.get("confirm_clear"):
+        st.warning("⚠️ 确定要清空所有历史记录吗？此操作不可撤销。")
+        yes_col, no_col, _ = st.columns([1, 1, 4])
+        with yes_col:
+            if st.button("✅ 确认清空", type="primary", use_container_width=True,
+                         key="do_clear"):
+                ok, err2 = db_clear_all()
+                st.session_state["confirm_clear"] = False
+                st.session_state["today_count"] = 0
+                if ok:
+                    st.toast("记录已清空", icon="🗑️")
+                else:
+                    st.error(f"清空失败：{err2}")
+                st.rerun()
+        with no_col:
+            if st.button("❌ 取消", use_container_width=True, key="cancel_clear"):
+                st.session_state["confirm_clear"] = False
+                st.rerun()
 
     records, err = db_load_all()
 
