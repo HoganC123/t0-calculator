@@ -1,0 +1,26 @@
+# 本地数据库（含交易记录，不上传）
+trading.db
+
+# Streamlit 密钥文件（含 API Key，绝对不能上传）
+.streamlit/secrets.toml
+
+# 旧版本本地历史文件
+history.json
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Claude Code 内部目录
+.claude/
