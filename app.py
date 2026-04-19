@@ -156,14 +156,11 @@ def save_section(key_prefix: str, trade_type: str, base_row: dict):
                    gross_profit, total_fee, net_profit, new_avg_cost
     """
     st.markdown('<div class="save-bar">', unsafe_allow_html=True)
-    sc1, sc2, sc3 = st.columns([2, 2, 1])
+    sc1, sc2 = st.columns([3, 1])
     with sc1:
-        stock = st.text_input("股票名称",    placeholder="如：宁德时代",
+        stock = st.text_input("股票名称", placeholder="",
                               key=f"{key_prefix}_stock")
     with sc2:
-        notes = st.text_input("备注（可选）", placeholder="如：早盘高开，快进快出",
-                              key=f"{key_prefix}_notes")
-    with sc3:
         st.markdown("<br>", unsafe_allow_html=True)
         clicked = st.button("📌 保存本次记录", key=f"{key_prefix}_save",
                             use_container_width=True)
@@ -173,7 +170,7 @@ def save_section(key_prefix: str, trade_type: str, base_row: dict):
         row = {
             "trade_type":  trade_type,
             "stock_name":  stock.strip() or "未填写",
-            "notes":       notes.strip(),
+            "notes":       "",
             **base_row,
         }
         ok, err = db_insert(row)
@@ -209,18 +206,18 @@ with tab3:
     st.subheader("输入区")
     c1, c2, c3 = st.columns(3)
     with c1:
-        jd_holding  = st.number_input("原有持仓数量（股）",     min_value=0,    value=10000, step=100,   key="jd_h")
-        jd_avg_cost = st.number_input("原有持仓均价/成本（元）", min_value=0.01, value=10.00, step=0.01,  format="%.3f", key="jd_a")
+        jd_holding  = st.number_input("原有持仓数量（股）",     min_value=0,   value=0,   step=100,   key="jd_h")
+        jd_avg_cost = st.number_input("原有持仓均价/成本（元）", min_value=0.0, value=0.0, step=0.01,  format="%.3f", key="jd_a")
     with c2:
-        jd_funds  = st.number_input("机动仓可用资金（元）", min_value=0.0,  value=50000.0, step=1000.0, format="%.2f", key="jd_f")
-        jd_buy_px = st.number_input("计划买入价格（元）",   min_value=0.01, value=9.70,   step=0.01,   format="%.3f", key="jd_bp")
+        jd_funds  = st.number_input("机动仓可用资金（元）", min_value=0.0, value=0.0, step=1000.0, format="%.2f", key="jd_f")
+        jd_buy_px = st.number_input("计划买入价格（元）",   min_value=0.0, value=0.0, step=0.01,   format="%.3f", key="jd_bp")
     with c3:
-        jd_sell_px  = st.number_input("计划卖出价格（元）", min_value=0.01, value=10.00, step=0.01, format="%.3f", key="jd_sp")
-        max_by_fund = int(jd_funds // jd_buy_px // 100) * 100
+        jd_sell_px  = st.number_input("计划卖出价格（元）", min_value=0.0, value=0.0, step=0.01, format="%.3f", key="jd_sp")
+        max_by_fund = int(jd_funds // jd_buy_px // 100) * 100 if jd_buy_px > 0 else 0
         jd_buy_qty  = st.number_input(
             f"买入数量（股，资金上限 {max_by_fund:,} 股）",
             min_value=0, max_value=max(max_by_fund, 0),
-            value=min(1000, max_by_fund), step=100, key="jd_q")
+            value=min(0, max_by_fund), step=100, key="jd_q")
 
     jd_n = (jd_buy_qty // 100) * 100
 
@@ -298,12 +295,12 @@ with tab1:
     st.subheader("输入区")
     col1, col2 = st.columns(2)
     with col1:
-        holding_qty = st.number_input("当前持仓数量（股）", min_value=0, value=10000, step=100)
-        avg_cost    = st.number_input("持仓均价/成本（元）", min_value=0.0, value=10.00, step=0.01, format="%.3f")
-        sell_qty    = st.number_input("计划卖出数量（股）",  min_value=0, value=1000, step=100)
+        holding_qty = st.number_input("当前持仓数量（股）", min_value=0, value=0,   step=100)
+        avg_cost    = st.number_input("持仓均价/成本（元）", min_value=0.0, value=0.0, step=0.01, format="%.3f")
+        sell_qty    = st.number_input("计划卖出数量（股）",  min_value=0, value=0,   step=100)
     with col2:
-        sell_price       = st.number_input("卖出价格（元）",           min_value=0.0, value=10.50, step=0.01, format="%.3f")
-        target_rebuy     = st.number_input("目标回补价格（元，可选）", min_value=0.0, value=10.00, step=0.01, format="%.3f")
+        sell_price       = st.number_input("卖出价格（元）",           min_value=0.0, value=0.0, step=0.01, format="%.3f")
+        target_rebuy     = st.number_input("目标回补价格（元，可选）", min_value=0.0, value=0.0, step=0.01, format="%.3f")
         use_target_rebuy = st.checkbox("启用目标回补价格", value=True)
 
     st.divider()
@@ -412,13 +409,13 @@ with tab2:
         st.subheader("我想卖出一部分再低价回补，让成本降低 X 元")
         c1, c2, c3 = st.columns(3)
         with c1:
-            rv_h = st.number_input("当前持仓（股）", min_value=1,    value=10000, step=100,  key="rv_h")
-            rv_a = st.number_input("当前均价（元）", min_value=0.01, value=10.00, step=0.01, format="%.3f", key="rv_a")
+            rv_h = st.number_input("当前持仓（股）", min_value=0,   value=0,   step=100,  key="rv_h")
+            rv_a = st.number_input("当前均价（元）", min_value=0.0, value=0.0, step=0.01, format="%.3f", key="rv_a")
         with c2:
-            rv_r = st.number_input("目标降低成本（元/股）", min_value=0.001, value=0.10, step=0.01, format="%.3f", key="rv_r")
-            rv_b = st.number_input("计划回补价格（元）",    min_value=0.01,  value=9.80, step=0.01, format="%.3f", key="rv_b")
+            rv_r = st.number_input("目标降低成本（元/股）", min_value=0.0, value=0.0, step=0.01, format="%.3f", key="rv_r")
+            rv_b = st.number_input("计划回补价格（元）",    min_value=0.0, value=0.0, step=0.01, format="%.3f", key="rv_b")
         with c3:
-            rv_sp = st.number_input("卖出价格（元）", min_value=0.01, value=10.50, step=0.01, format="%.3f", key="rv_sp")
+            rv_sp = st.number_input("卖出价格（元）", min_value=0.0, value=0.0, step=0.01, format="%.3f", key="rv_sp")
 
         st.divider()
         gap = rv_a - rv_b
@@ -485,11 +482,11 @@ with tab2:
         st.subheader("我想通过额外买入来摊薄成本，降低 X 元/股")
         c1, c2, _ = st.columns(3)
         with c1:
-            bi_h = st.number_input("当前持仓数量（股）", min_value=1,    value=10000, step=100,  key="bi_h")
-            bi_a = st.number_input("当前持仓均价（元）", min_value=0.01, value=10.00, step=0.01, format="%.3f", key="bi_a")
+            bi_h = st.number_input("当前持仓数量（股）", min_value=0,   value=0,   step=100,  key="bi_h")
+            bi_a = st.number_input("当前持仓均价（元）", min_value=0.0, value=0.0, step=0.01, format="%.3f", key="bi_a")
         with c2:
-            bi_r  = st.number_input("目标成本降低幅度（元/股）", min_value=0.001, value=0.20, step=0.01, format="%.3f", key="bi_r")
-            bi_bp = st.number_input("计划买入价格（元）",        min_value=0.01,  value=9.50, step=0.01, format="%.3f", key="bi_bp")
+            bi_r  = st.number_input("目标成本降低幅度（元/股）", min_value=0.0, value=0.0, step=0.01, format="%.3f", key="bi_r")
+            bi_bp = st.number_input("计划买入价格（元）",        min_value=0.0, value=0.0, step=0.01, format="%.3f", key="bi_bp")
 
         st.divider()
         gap_bi = bi_a - bi_bp
