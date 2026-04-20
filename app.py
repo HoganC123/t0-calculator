@@ -275,10 +275,6 @@ def _show_auth_page() -> None:
     st.markdown("<br>", unsafe_allow_html=True)
     _, card, _ = st.columns([1, 1.6, 1])
     with card:
-        st.markdown(
-            '<div style="background:rgba(255,255,255,0.04);border-radius:12px;'
-            'padding:32px 36px;">', unsafe_allow_html=True)
-
         tab_in, tab_up = st.tabs(["🔑  登录", "📝  注册"])
 
         # ── 登录 Tab ──
@@ -319,7 +315,6 @@ def _show_auth_page() -> None:
                     else:
                         st.error(f"注册失败：{err}")
 
-        st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ── 登录拦截：未登录时显示表单，中止后续渲染 ──────────────────────────────────
