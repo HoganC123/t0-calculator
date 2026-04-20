@@ -26,6 +26,7 @@ st.markdown("""
 .be-note          { font-size:0.78rem; color:rgba(250,250,250,0.45); margin:4px 0 0 0; }
 
 .save-bar { background:rgba(255,255,255,0.03); border-radius:8px; padding:14px 16px; margin-top:12px; }
+.pct-hint  { font-size:0.78rem; margin:-6px 0 6px 0; }
 
 @media (max-width:640px) {
     [data-testid="column"] { min-width:100% !important; flex:1 1 100% !important; }
@@ -99,6 +100,21 @@ def db_clear_all() -> tuple[bool, str]:
 # ══════════════════════════════════════════════════════════════════════════════
 # 工具函数
 # ══════════════════════════════════════════════════════════════════════════════
+def pct_hint(price: float, ref: float, label_up: str, label_dn: str) -> None:
+    """在输入框正下方显示相对涨跌幅（涨绿跌红，字号小一号）。
+    price / ref 任一为 0 时不渲染。"""
+    if price <= 0 or ref <= 0:
+        return
+    pct   = (price - ref) / ref * 100
+    arrow = "▲" if pct >= 0 else "▼"
+    color = "#21c55d" if pct >= 0 else "#ff4b4b"
+    label = label_up if pct >= 0 else label_dn
+    st.markdown(
+        f'<p class="pct-hint" style="color:{color}">'
+        f'{arrow} {pct:+.2f}%　{label}</p>',
+        unsafe_allow_html=True)
+
+
 def pnl_card(col, label: str, amount: float, unit: str = "元", decimals: int = 2):
     sign = "+" if amount > 0 else ""
     css  = "pnl-red" if amount > 0 else ("pnl-green" if amount < 0 else "pnl-gray")
@@ -207,6 +223,7 @@ with tab3:
         jd_buy_px = st.number_input("计划买入价格（元）",   min_value=0.0, value=0.0, step=0.01,   format="%.3f", key="jd_bp")
     with c3:
         jd_sell_px  = st.number_input("计划卖出价格（元）", min_value=0.0, value=0.0, step=0.01, format="%.3f", key="jd_sp")
+        pct_hint(jd_sell_px, jd_buy_px, "高于买入价", "低于买入价，将亏损")
         max_by_fund = int(jd_funds // jd_buy_px // 100) * 100 if jd_buy_px > 0 else 0
         jd_buy_qty  = st.number_input(
             f"买入数量（股，资金上限 {max_by_fund:,} 股）",
@@ -294,7 +311,9 @@ with tab1:
         sell_qty    = st.number_input("计划卖出数量（股）",  min_value=0, value=0,   step=100)
     with col2:
         sell_price       = st.number_input("卖出价格（元）",           min_value=0.0, value=0.0, step=0.01, format="%.3f")
+        pct_hint(sell_price, avg_cost, "高于成本", "低于成本，卖出亏损")
         target_rebuy     = st.number_input("目标回补价格（元，可选）", min_value=0.0, value=0.0, step=0.01, format="%.3f")
+        pct_hint(target_rebuy, sell_price, "高于卖出价，将亏损", "低于卖出价，有利润空间")
         use_target_rebuy = st.checkbox("启用目标回补价格", value=True)
 
     st.divider()
