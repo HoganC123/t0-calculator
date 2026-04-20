@@ -62,6 +62,21 @@ async def list_trades() -> list[dict]:
     return resp.json()
 
 
+async def delete_trade(record_id: str) -> None:
+    """
+    DELETE /rest/v1/trade_records?id=eq.<record_id>
+    删除指定 id 的单条记录
+    """
+    async with httpx.AsyncClient() as client:
+        resp = await client.delete(
+            _TABLE,
+            params={"id": f"eq.{record_id}"},
+            headers=_headers(),
+            timeout=10,
+        )
+    _raise(resp)
+
+
 async def clear_trades() -> int:
     """
     DELETE /rest/v1/trade_records?id=not.is.null

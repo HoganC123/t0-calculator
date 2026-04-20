@@ -76,6 +76,16 @@ def db_load_all() -> tuple[list, str]:
         return [], _ERR_CONN if _unavailable(e) else str(e)
 
 
+def db_delete_one(record_id) -> tuple[bool, str]:
+    """DELETE /trade/delete/{id}，删除单条记录"""
+    try:
+        resp = _req.delete(f"{_API}/trade/delete/{record_id}", timeout=_TIMEOUT)
+        resp.raise_for_status()
+        return True, ""
+    except Exception as e:
+        return False, _ERR_CONN if _unavailable(e) else str(e)
+
+
 def db_clear_all() -> tuple[bool, str]:
     """DELETE /trade/clear，返回 (成功, 错误信息)"""
     try:
@@ -622,15 +632,17 @@ with tab4:
 
         # ── 表格显示
         for r in filtered:
+            rid       = r.get("id")
             ts        = (r.get("created_at") or "")[:16].replace("T", " ")
             ttype     = r.get("trade_type", "—")
             stock     = r.get("stock_name", "—")
             net       = r.get("net_profit", 0) or 0
             net_color = "#ff4b4b" if net > 0 else ("#21c55d" if net < 0 else "#aaa")
             net_sign  = "+" if net > 0 else ""
+            confirm_key = f"confirm_del_{rid}"
 
             with st.container():
-                hd1, hd2, hd3, hd4 = st.columns([2, 1, 1, 1])
+                hd1, hd2, hd3, hd4, hd_del = st.columns([2, 1, 1, 1, 0.4])
                 hd1.markdown(f"**{ts}**　`{ttype}`　**{stock}**")
                 hd2.markdown(f"买入 **{r.get('buy_price',0):.3f}** 元")
                 hd3.markdown(f"卖出 **{r.get('sell_price',0):.3f}** 元")
@@ -638,6 +650,32 @@ with tab4:
                     f'税后盈利：<span style="color:{net_color};font-weight:700">'
                     f'{net_sign}{net:.2f} 元</span>',
                     unsafe_allow_html=True)
+                with hd_del:
+                    if st.button("🗑️", key=f"del_btn_{rid}",
+                                 help="删除这条记录",
+                                 use_container_width=True):
+                        st.session_state[confirm_key] = True
+
+                # ── 单条二次确认
+                if st.session_state.get(confirm_key):
+                    st.warning(f"确定删除这条记录吗？（{ts}　{ttype}　{stock}）")
+                    yes_c, no_c, _ = st.columns([1, 1, 4])
+                    with yes_c:
+                        if st.button("✅ 确认删除", type="primary",
+                                     use_container_width=True,
+                                     key=f"do_del_{rid}"):
+                            ok, err_d = db_delete_one(rid)
+                            st.session_state.pop(confirm_key, None)
+                            if ok:
+                                st.toast("记录已删除", icon="🗑️")
+                            else:
+                                st.error(f"删除失败：{err_d}")
+                            st.rerun()
+                    with no_c:
+                        if st.button("❌ 取消", use_container_width=True,
+                                     key=f"cancel_del_{rid}"):
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
 
                 with st.expander("展开详情"):
                     d1, d2, d3, d4, d5 = st.columns(5)

@@ -6,7 +6,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from database import clear_trades, list_trades, save_trade
+from database import clear_trades, delete_trade, list_trades, save_trade
 
 router = APIRouter(prefix="/trade", tags=["trade"])
 
@@ -45,6 +45,18 @@ async def api_list() -> Any:
     """获取所有记录，按时间倒序"""
     try:
         return await list_trades()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/delete/{record_id}")
+async def api_delete(record_id: str) -> Any:
+    """删除指定 id 的单条记录"""
+    try:
+        await delete_trade(record_id)
+        return {"deleted": record_id, "message": "记录已删除"}
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
     except Exception as e:
