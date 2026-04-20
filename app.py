@@ -57,10 +57,28 @@ def _unavailable(e: Exception) -> bool:
                           _req.exceptions.Timeout))
 
 
+def _auth_hdr() -> dict:
+    """从 session_state 取 token，拼成 Authorization header"""
+    token = st.session_state.get("token", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _handle_expired() -> None:
+    """token 过期时清除登录状态并刷新页面"""
+    st.session_state.pop("token", None)
+    st.session_state.pop("user_email", None)
+    st.session_state.pop("today_count", None)
+    st.error("登录已过期，请重新登录")
+    st.rerun()
+
+
 def db_insert(row: dict) -> tuple[bool, str]:
     """POST /trade/save，返回 (成功, 错误信息)"""
     try:
-        resp = _req.post(f"{_API}/trade/save", json=row, timeout=_TIMEOUT)
+        resp = _req.post(f"{_API}/trade/save", json=row,
+                         headers=_auth_hdr(), timeout=_TIMEOUT)
+        if resp.status_code == 401:
+            _handle_expired()
         resp.raise_for_status()
         return True, ""
     except Exception as e:
@@ -70,7 +88,10 @@ def db_insert(row: dict) -> tuple[bool, str]:
 def db_load_all() -> tuple[list, str]:
     """GET /trade/list，返回 (records, 错误信息)"""
     try:
-        resp = _req.get(f"{_API}/trade/list", timeout=_TIMEOUT)
+        resp = _req.get(f"{_API}/trade/list",
+                        headers=_auth_hdr(), timeout=_TIMEOUT)
+        if resp.status_code == 401:
+            _handle_expired()
         resp.raise_for_status()
         return resp.json(), ""
     except Exception as e:
@@ -80,7 +101,10 @@ def db_load_all() -> tuple[list, str]:
 def db_delete_one(record_id) -> tuple[bool, str]:
     """DELETE /trade/delete/{id}，删除单条记录"""
     try:
-        resp = _req.delete(f"{_API}/trade/delete/{record_id}", timeout=_TIMEOUT)
+        resp = _req.delete(f"{_API}/trade/delete/{record_id}",
+                           headers=_auth_hdr(), timeout=_TIMEOUT)
+        if resp.status_code == 401:
+            _handle_expired()
         resp.raise_for_status()
         return True, ""
     except Exception as e:
@@ -90,7 +114,10 @@ def db_delete_one(record_id) -> tuple[bool, str]:
 def db_clear_all() -> tuple[bool, str]:
     """DELETE /trade/clear，返回 (成功, 错误信息)"""
     try:
-        resp = _req.delete(f"{_API}/trade/clear", timeout=_TIMEOUT)
+        resp = _req.delete(f"{_API}/trade/clear",
+                           headers=_auth_hdr(), timeout=_TIMEOUT)
+        if resp.status_code == 401:
+            _handle_expired()
         resp.raise_for_status()
         return True, ""
     except Exception as e:
@@ -193,8 +220,127 @@ def save_section(key_prefix: str, trade_type: str, base_row: dict):
             st.error(f"保存失败：{err}")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 用户认证
+# ══════════════════════════════════════════════════════════════════════════════
+
+def api_login(email: str, password: str) -> tuple[bool, str]:
+    """调用 /auth/login，成功后把 token 和邮箱写入 session_state"""
+    try:
+        resp = _req.post(f"{_API}/auth/login",
+                         json={"email": email, "password": password},
+                         timeout=_TIMEOUT)
+        if resp.status_code == 400:
+            return False, "邮箱或密码错误"
+        resp.raise_for_status()
+        data = resp.json()
+        st.session_state["token"]      = data["access_token"]
+        st.session_state["user_email"] = data.get("user", {}).get("email", email)
+        return True, ""
+    except Exception as e:
+        return False, _ERR_CONN if _unavailable(e) else str(e)
+
+
+def api_register(email: str, password: str) -> tuple[bool, str]:
+    """调用 /auth/register，返回 (成功, 错误信息)"""
+    try:
+        resp = _req.post(f"{_API}/auth/register",
+                         json={"email": email, "password": password},
+                         timeout=_TIMEOUT)
+        if resp.status_code == 422:
+            return False, "邮箱格式不正确或密码长度不足"
+        resp.raise_for_status()
+        return True, ""
+    except Exception as e:
+        return False, _ERR_CONN if _unavailable(e) else str(e)
+
+
+def api_logout() -> None:
+    """调用 /auth/logout 让 token 失效，然后清除本地状态"""
+    token = st.session_state.get("token", "")
+    if token:
+        try:
+            _req.post(f"{_API}/auth/logout",
+                      headers={"Authorization": f"Bearer {token}"},
+                      timeout=_TIMEOUT)
+        except Exception:
+            pass  # 网络异常也直接清除本地状态
+    st.session_state.pop("token",       None)
+    st.session_state.pop("user_email",  None)
+    st.session_state.pop("today_count", None)
+
+
+def _show_auth_page() -> None:
+    """未登录时显示的登录 / 注册表单（居中卡片）"""
+    st.markdown("<br>", unsafe_allow_html=True)
+    _, card, _ = st.columns([1, 1.6, 1])
+    with card:
+        st.markdown(
+            '<div style="background:rgba(255,255,255,0.04);border-radius:12px;'
+            'padding:32px 36px;">', unsafe_allow_html=True)
+
+        tab_in, tab_up = st.tabs(["🔑  登录", "📝  注册"])
+
+        # ── 登录 Tab ──
+        with tab_in:
+            email_in = st.text_input("邮箱", key="login_email",
+                                     placeholder="your@email.com")
+            pwd_in   = st.text_input("密码", type="password", key="login_pwd")
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("登 录", use_container_width=True,
+                         type="primary", key="do_login"):
+                if not email_in or not pwd_in:
+                    st.warning("请输入邮箱和密码")
+                else:
+                    with st.spinner("登录中…"):
+                        ok, err = api_login(email_in, pwd_in)
+                    if ok:
+                        st.rerun()
+                    else:
+                        st.error(f"登录失败：{err}")
+
+        # ── 注册 Tab ──
+        with tab_up:
+            email_up = st.text_input("邮箱", key="reg_email",
+                                     placeholder="your@email.com")
+            pwd_up   = st.text_input("密码（至少 6 位）", type="password",
+                                     key="reg_pwd")
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("注 册", use_container_width=True, key="do_register"):
+                if not email_up or not pwd_up:
+                    st.warning("请输入邮箱和密码")
+                elif len(pwd_up) < 6:
+                    st.warning("密码长度至少 6 位")
+                else:
+                    with st.spinner("注册中…"):
+                        ok, err = api_register(email_up, pwd_up)
+                    if ok:
+                        st.success("✅ 注册成功！请检查邮箱确认账号，然后回到「登录」Tab 登录。")
+                    else:
+                        st.error(f"注册失败：{err}")
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ── 登录拦截：未登录时显示表单，中止后续渲染 ──────────────────────────────────
+if "token" not in st.session_state:
+    _show_auth_page()
+    st.stop()
+
+
 # ── 侧边栏 ────────────────────────────────────────────────────────────────────
 with st.sidebar:
+    # ── 用户信息 + 退出 ──
+    user_email = st.session_state.get("user_email", "")
+    st.markdown(
+        f'<p style="font-size:0.82rem;color:rgba(250,250,250,0.55);margin:0">当前用户</p>'
+        f'<p style="font-size:0.9rem;font-weight:600;margin:2px 0 8px 0">{user_email}</p>',
+        unsafe_allow_html=True)
+    if st.button("退出登录", use_container_width=True, key="logout_btn"):
+        api_logout()
+        st.rerun()
+    st.divider()
+
     st.header("📋 操作记录")
     today_count = st.session_state.get("today_count", 0)
     if today_count == 0:
