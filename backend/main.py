@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import trade
+from routers import auth, trade
 
 app = FastAPI(
     title="A股散户工具平台",
@@ -19,6 +19,7 @@ app.add_middleware(
 )
 
 # ── 路由 ──────────────────────────────────────────────────────────────────────
+app.include_router(auth.router)
 app.include_router(trade.router)
 
 

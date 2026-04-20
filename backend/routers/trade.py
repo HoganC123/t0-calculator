@@ -3,10 +3,11 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from database import clear_trades, delete_trade, list_trades, save_trade
+from deps import require_auth
 
 router = APIRouter(prefix="/trade", tags=["trade"])
 
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/trade", tags=["trade"])
 # ── 数据模型 ──────────────────────────────────────────────────────────────────
 
 class TradeIn(BaseModel):
-    """保存交易记录时的请求体"""
+    """保存交易记录时的请求体（不含 user_id，由后端从 token 注入）"""
     trade_type:   str           = Field(...,    description="操作类型，如：正T / 反T")
     stock_name:   str           = Field("未填写", description="股票名称")
     buy_price:    float         = Field(0.0,    description="买入价（元）")
@@ -30,10 +31,13 @@ class TradeIn(BaseModel):
 # ── 接口 ──────────────────────────────────────────────────────────────────────
 
 @router.post("/save", status_code=201)
-async def api_save(body: TradeIn) -> Any:
-    """保存一条交易记录到 Supabase"""
+async def api_save(
+    body: TradeIn,
+    user: dict = Depends(require_auth),
+) -> Any:
+    """保存一条交易记录，自动关联当前用户 user_id"""
     try:
-        return await save_trade(body.model_dump())
+        return await save_trade(body.model_dump(), user_id=user["id"])
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
     except Exception as e:
@@ -41,10 +45,12 @@ async def api_save(body: TradeIn) -> Any:
 
 
 @router.get("/list")
-async def api_list() -> Any:
-    """获取所有记录，按时间倒序"""
+async def api_list(
+    user: dict = Depends(require_auth),
+) -> Any:
+    """获取当前用户的所有记录，按时间倒序"""
     try:
-        return await list_trades()
+        return await list_trades(user_id=user["id"])
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
     except Exception as e:
@@ -52,10 +58,13 @@ async def api_list() -> Any:
 
 
 @router.delete("/delete/{record_id}")
-async def api_delete(record_id: str) -> Any:
-    """删除指定 id 的单条记录"""
+async def api_delete(
+    record_id: str,
+    user: dict = Depends(require_auth),
+) -> Any:
+    """删除当前用户的指定记录（其他用户的记录不受影响）"""
     try:
-        await delete_trade(record_id)
+        await delete_trade(record_id, user_id=user["id"])
         return {"deleted": record_id, "message": "记录已删除"}
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
@@ -64,10 +73,12 @@ async def api_delete(record_id: str) -> Any:
 
 
 @router.delete("/clear")
-async def api_clear() -> Any:
-    """清空所有记录"""
+async def api_clear(
+    user: dict = Depends(require_auth),
+) -> Any:
+    """清空当前用户的所有记录"""
     try:
-        count = await clear_trades()
+        count = await clear_trades(user_id=user["id"])
         return {"deleted": count, "message": "记录已清空"}
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=str(e))

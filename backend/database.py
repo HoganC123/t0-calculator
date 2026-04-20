@@ -1,5 +1,9 @@
 """
 Supabase REST API 封装（用 httpx，不依赖 supabase Python 库）
+
+分两大块：
+  - Auth：注册 / 登录 / 退出 / 获取当前用户
+  - Trade：增删查，全部带 user_id 过滤
 """
 from __future__ import annotations
 
@@ -10,12 +14,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-_KEY = os.getenv("SUPABASE_KEY", "")
+_URL   = os.getenv("SUPABASE_URL", "").rstrip("/")
+_KEY   = os.getenv("SUPABASE_KEY", "")
 _TABLE = f"{_URL}/rest/v1/trade_records"
+_AUTH  = f"{_URL}/auth/v1"
 
+
+# ── 公共 Header 构造 ───────────────────────────────────────────────────────────
 
 def _headers(prefer: str = "") -> dict:
+    """使用 Service Role Key 访问 PostgREST（绕过 RLS，由应用层做 user_id 过滤）"""
     h = {
         "apikey":        _KEY,
         "Authorization": f"Bearer {_KEY}",
@@ -26,35 +34,114 @@ def _headers(prefer: str = "") -> dict:
     return h
 
 
-# ── 三个核心函数 ───────────────────────────────────────────────────────────────
+def _auth_headers(token: str) -> dict:
+    """使用用户 JWT 访问 Supabase Auth API"""
+    return {
+        "apikey":        _KEY,
+        "Authorization": f"Bearer {token}",
+        "Content-Type":  "application/json",
+    }
 
-async def save_trade(data: dict) -> dict:
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Auth 函数
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def auth_sign_up(email: str, password: str) -> dict:
     """
-    POST /rest/v1/trade_records
-    返回 Supabase 插入后的完整记录（含 id、created_at）
+    POST /auth/v1/signup
+    返回 Supabase 用户对象（含 id、email、created_at）
     """
     async with httpx.AsyncClient() as client:
         resp = await client.post(
+            f"{_AUTH}/signup",
+            json={"email": email, "password": password},
+            headers={"apikey": _KEY, "Content-Type": "application/json"},
+            timeout=10,
+        )
+    _raise(resp)
+    return resp.json()
+
+
+async def auth_sign_in(email: str, password: str) -> dict:
+    """
+    POST /auth/v1/token?grant_type=password
+    返回 {access_token, token_type, expires_in, refresh_token, user}
+    """
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{_AUTH}/token?grant_type=password",
+            json={"email": email, "password": password},
+            headers={"apikey": _KEY, "Content-Type": "application/json"},
+            timeout=10,
+        )
+    _raise(resp)
+    return resp.json()
+
+
+async def auth_sign_out(token: str) -> None:
+    """POST /auth/v1/logout — 使该 token 失效"""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{_AUTH}/logout",
+            headers=_auth_headers(token),
+            timeout=10,
+        )
+    # Supabase 退出登录返回 204，不需要 body
+    if resp.status_code not in (200, 204):
+        _raise(resp)
+
+
+async def auth_get_user(token: str) -> dict:
+    """
+    GET /auth/v1/user — 验证 token 并返回用户信息
+    token 无效时 Supabase 返回 401，由调用方处理
+    """
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{_AUTH}/user",
+            headers=_auth_headers(token),
+            timeout=10,
+        )
+    _raise(resp)
+    return resp.json()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Trade 函数（全部带 user_id）
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def save_trade(data: dict, user_id: str) -> dict:
+    """
+    POST /rest/v1/trade_records
+    自动注入 user_id，返回插入后的完整记录
+    """
+    payload = {**data, "user_id": user_id}
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
             _TABLE,
-            json=data,
+            json=payload,
             headers=_headers("return=representation"),
             timeout=10,
         )
     _raise(resp)
     result = resp.json()
-    # Supabase 即使单条插入也返回数组
     return result[0] if isinstance(result, list) and result else result
 
 
-async def list_trades() -> list[dict]:
+async def list_trades(user_id: str) -> list[dict]:
     """
-    GET /rest/v1/trade_records?order=created_at.desc
-    返回所有记录，按时间倒序
+    GET /rest/v1/trade_records?user_id=eq.<user_id>&order=created_at.desc
+    只返回当前用户自己的记录
     """
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             _TABLE,
-            params={"order": "created_at.desc", "limit": "1000"},
+            params={
+                "user_id": f"eq.{user_id}",
+                "order":   "created_at.desc",
+                "limit":   "1000",
+            },
             headers=_headers(),
             timeout=10,
         )
@@ -62,35 +149,34 @@ async def list_trades() -> list[dict]:
     return resp.json()
 
 
-async def delete_trade(record_id: str) -> None:
+async def delete_trade(record_id: str, user_id: str) -> None:
     """
-    DELETE /rest/v1/trade_records?id=eq.<record_id>
-    删除指定 id 的单条记录
+    DELETE /rest/v1/trade_records?id=eq.<id>&user_id=eq.<user_id>
+    双重过滤：防止越权删除他人记录
     """
     async with httpx.AsyncClient() as client:
         resp = await client.delete(
             _TABLE,
-            params={"id": f"eq.{record_id}"},
+            params={"id": f"eq.{record_id}", "user_id": f"eq.{user_id}"},
             headers=_headers(),
             timeout=10,
         )
     _raise(resp)
 
 
-async def clear_trades() -> int:
+async def clear_trades(user_id: str) -> int:
     """
-    DELETE /rest/v1/trade_records?id=not.is.null
-    删除所有记录，返回删除条数
+    DELETE /rest/v1/trade_records?user_id=eq.<user_id>
+    只清空当前用户的记录，返回删除条数
     """
     async with httpx.AsyncClient() as client:
         resp = await client.delete(
             _TABLE,
-            params={"id": "not.is.null"},
+            params={"user_id": f"eq.{user_id}"},
             headers=_headers("return=representation"),
             timeout=10,
         )
     _raise(resp)
-    # 204 No Content 时 body 为空
     if resp.status_code == 204:
         return 0
     deleted = resp.json()
