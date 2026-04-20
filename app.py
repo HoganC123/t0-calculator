@@ -1,5 +1,6 @@
 import streamlit as st
 import requests as _req
+from datetime import date
 
 st.set_page_config(page_title="A股 T+0 辅助计算器", layout="wide")
 
@@ -124,6 +125,44 @@ def db_clear_all() -> tuple[bool, str]:
         return False, _ERR_CONN if _unavailable(e) else str(e)
 
 
+# ── 交易日志 API ──────────────────────────────────────────────────────────────
+
+def db_journal_save(data: dict) -> tuple[bool, str]:
+    try:
+        resp = _req.post(f"{_API}/journal/save", json=data,
+                         headers=_auth_hdr(), timeout=_TIMEOUT)
+        if resp.status_code == 401:
+            _handle_expired()
+        resp.raise_for_status()
+        return True, ""
+    except Exception as e:
+        return False, _ERR_CONN if _unavailable(e) else str(e)
+
+
+def db_journal_list() -> tuple[list, str]:
+    try:
+        resp = _req.get(f"{_API}/journal/list",
+                        headers=_auth_hdr(), timeout=_TIMEOUT)
+        if resp.status_code == 401:
+            _handle_expired()
+        resp.raise_for_status()
+        return resp.json(), ""
+    except Exception as e:
+        return [], _ERR_CONN if _unavailable(e) else str(e)
+
+
+def db_journal_delete(record_id) -> tuple[bool, str]:
+    try:
+        resp = _req.delete(f"{_API}/journal/delete/{record_id}",
+                           headers=_auth_hdr(), timeout=_TIMEOUT)
+        if resp.status_code == 401:
+            _handle_expired()
+        resp.raise_for_status()
+        return True, ""
+    except Exception as e:
+        return False, _ERR_CONN if _unavailable(e) else str(e)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 工具函数
 # ══════════════════════════════════════════════════════════════════════════════
@@ -218,6 +257,198 @@ def save_section(key_prefix: str, trade_type: str, base_row: dict):
             st.session_state["today_count"] += 1
         else:
             st.error(f"保存失败：{err}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 交易日志页面
+# ══════════════════════════════════════════════════════════════════════════════
+_ACTION_TYPES  = ["买入", "卖出", "加仓", "减仓"]
+_EMOTIONS      = ["冷静", "冲动", "跟风", "恐慌"]
+_EMOTION_COLOR = {"冷静": "#21c55d", "冲动": "#ff4b4b", "跟风": "#f59e0b", "恐慌": "#8b5cf6"}
+_EMOTION_ICON  = {"冷静": "🧠", "冲动": "⚡", "跟风": "🐑", "恐慌": "😨"}
+_ACTION_COLOR  = {"买入": "#ff4b4b", "卖出": "#21c55d", "加仓": "#f87171", "减仓": "#4ade80"}
+
+
+def show_journal_page():
+    st.subheader("📓 个人交易日志")
+
+    # ── 新增表单 ──────────────────────────────────────────────────────────────
+    with st.expander("➕  记录新交易", expanded=not bool(st.session_state.get("jl_saved"))):
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            jl_code   = st.text_input("股票代码", placeholder="如：601899", key="jl_code")
+            jl_name   = st.text_input("股票名称", placeholder="如：紫金矿业", key="jl_name")
+        with fc2:
+            jl_action  = st.selectbox("操作类型", _ACTION_TYPES, key="jl_action")
+            jl_emotion = st.selectbox("情绪标签", _EMOTIONS, key="jl_emotion")
+        with fc3:
+            jl_price = st.number_input("成交价格（元）", min_value=0.0, value=0.0,
+                                       step=0.01, format="%.3f", key="jl_price")
+            jl_qty   = st.number_input("成交数量（股）", min_value=0, value=0,
+                                       step=100, key="jl_qty")
+
+        jl_date   = st.date_input("成交日期", value=date.today(), key="jl_date")
+        jl_reason = st.text_area("交易理由（必填）",
+                                 placeholder="为什么进行这笔交易？入场逻辑是什么？",
+                                 key="jl_reason", height=90)
+        jl_notes  = st.text_input("备注（可选）", key="jl_notes")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("💾  保存日志", type="primary", key="jl_save"):
+            if not jl_reason.strip():
+                st.error("交易理由不能为空")
+            elif jl_price <= 0:
+                st.error("请输入有效的成交价格")
+            elif jl_qty <= 0:
+                st.error("请输入有效的成交数量")
+            else:
+                ok, err = db_journal_save({
+                    "stock_code":  jl_code.strip(),
+                    "stock_name":  jl_name.strip(),
+                    "action_type": jl_action,
+                    "price":       jl_price,
+                    "quantity":    jl_qty,
+                    "trade_date":  str(jl_date),
+                    "reason":      jl_reason.strip(),
+                    "emotion":     jl_emotion,
+                    "notes":       jl_notes.strip(),
+                })
+                if ok:
+                    st.session_state["jl_saved"] = True
+                    st.toast("✅ 日志已保存", icon="📓")
+                    st.rerun()
+                else:
+                    st.error(f"保存失败：{err}")
+
+    # ── 加载日志 ──────────────────────────────────────────────────────────────
+    records, err = db_journal_list()
+    if err:
+        st.error(f"读取失败：{err}")
+        return
+    if not records:
+        st.info("暂无交易日志。点击上方「记录新交易」开始记录。")
+        return
+
+    total = len(records)
+
+    # ── 统计面板 ──────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### 📊 统计分析")
+    stat1, stat2, stat3 = st.columns([3, 2, 1])
+
+    with stat1:
+        st.markdown("**情绪分布**")
+        em_counts = {}
+        for r in records:
+            em = r.get("emotion", "冷静")
+            em_counts[em] = em_counts.get(em, 0) + 1
+        for em in _EMOTIONS:
+            cnt = em_counts.get(em, 0)
+            pct = cnt / total * 100 if total else 0
+            bar_fill = int(pct / 5)
+            color = _EMOTION_COLOR[em]
+            st.markdown(
+                f'<p style="margin:5px 0;font-size:0.88rem">'
+                f'<span style="color:{color};font-weight:600;display:inline-block;width:3em">{em}</span>'
+                f'<span style="color:rgba(250,250,250,0.25)">{"█"*bar_fill}{"░"*(20-bar_fill)}</span>'
+                f'&nbsp;<span style="color:rgba(250,250,250,0.55)">{cnt} 次 {pct:.0f}%</span></p>',
+                unsafe_allow_html=True)
+
+    with stat2:
+        st.markdown("**最常交易 Top 3**")
+        stock_counts: dict = {}
+        for r in records:
+            key = r.get("stock_name") or r.get("stock_code") or "未知"
+            stock_counts[key] = stock_counts.get(key, 0) + 1
+        top3 = sorted(stock_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+        for i, (name, cnt) in enumerate(top3, 1):
+            st.markdown(
+                f'<p style="margin:8px 0;font-size:0.9rem">'
+                f'<span style="color:rgba(250,250,250,0.4)">#{i}</span>&nbsp;'
+                f'<span style="font-weight:600">{name}</span>&nbsp;'
+                f'<span style="color:rgba(250,250,250,0.5)">{cnt} 次</span></p>',
+                unsafe_allow_html=True)
+
+    with stat3:
+        st.metric("总记录数", f"{total} 条")
+
+    # ── 筛选 ──────────────────────────────────────────────────────────────────
+    st.divider()
+    fl1, fl2, fl3 = st.columns(3)
+    with fl1:
+        f_stock   = st.text_input("筛选股票名称/代码", key="jl_fs")
+    with fl2:
+        f_action  = st.selectbox("操作类型", ["全部"] + _ACTION_TYPES, key="jl_fa")
+    with fl3:
+        f_emotion = st.selectbox("情绪标签", ["全部"] + _EMOTIONS, key="jl_fe")
+
+    filtered = [
+        r for r in records
+        if (not f_stock or f_stock in (r.get("stock_name","") + r.get("stock_code","")))
+        and (f_action  == "全部" or r.get("action_type") == f_action)
+        and (f_emotion == "全部" or r.get("emotion")     == f_emotion)
+    ]
+    st.caption(f"显示 {len(filtered)} / {total} 条记录")
+    st.divider()
+
+    # ── 日志列表 ──────────────────────────────────────────────────────────────
+    for r in filtered:
+        rid     = r.get("id")
+        conf_k  = f"jl_conf_{rid}"
+        td      = (r.get("trade_date") or "")[:10]
+        action  = r.get("action_type", "")
+        stock   = r.get("stock_name") or r.get("stock_code") or "—"
+        code    = r.get("stock_code", "")
+        price   = r.get("price", 0)
+        qty     = r.get("quantity", 0)
+        emotion = r.get("emotion", "")
+        reason  = r.get("reason", "")
+        notes   = r.get("notes", "")
+        a_color = _ACTION_COLOR.get(action, "#aaa")
+        e_icon  = _EMOTION_ICON.get(emotion, "")
+
+        with st.container():
+            c1, c2, c3, c_del = st.columns([2.8, 1.8, 1.2, 0.4])
+            c1.markdown(
+                f'**{td}**&nbsp;&nbsp;'
+                f'<span style="color:{a_color};font-weight:700">{action}</span>&nbsp;&nbsp;'
+                f'**{stock}**' + (f'&nbsp;<span style="color:rgba(250,250,250,0.4);font-size:0.8rem">({code})</span>' if code else ''),
+                unsafe_allow_html=True)
+            c2.markdown(f"**{price:.3f}** 元 × **{qty:,}** 股")
+            c3.markdown(f"{e_icon} {emotion}")
+            with c_del:
+                if st.button("🗑️", key=f"jl_delbtn_{rid}", help="删除",
+                             use_container_width=True):
+                    st.session_state[conf_k] = True
+
+            if st.session_state.get(conf_k):
+                st.warning(f"确定删除这条记录吗？（{td} {action} {stock}）")
+                yc, nc, _ = st.columns([1, 1, 4])
+                with yc:
+                    if st.button("✅ 确认删除", type="primary",
+                                 use_container_width=True, key=f"jl_dodel_{rid}"):
+                        ok2, err2 = db_journal_delete(rid)
+                        st.session_state.pop(conf_k, None)
+                        if ok2:
+                            st.toast("已删除", icon="🗑️")
+                        else:
+                            st.error(f"删除失败：{err2}")
+                        st.rerun()
+                with nc:
+                    if st.button("❌ 取消", use_container_width=True,
+                                 key=f"jl_cancel_{rid}"):
+                        st.session_state.pop(conf_k, None)
+                        st.rerun()
+
+            with st.expander("查看详情"):
+                st.markdown(f"**交易理由：** {reason}")
+                if notes:
+                    st.caption(f"备注：{notes}")
+                dm1, dm2, dm3 = st.columns(3)
+                dm1.metric("成交价", f"{price:.3f} 元")
+                dm2.metric("数量",   f"{qty:,} 股")
+                dm3.metric("成交金额", f"{price * qty:,.2f} 元")
+            st.divider()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -325,6 +556,11 @@ if "token" not in st.session_state:
 
 # ── 侧边栏 ────────────────────────────────────────────────────────────────────
 with st.sidebar:
+    # ── 工具导航 ──
+    st.radio("", ["📊 T+0 计算器", "📓 交易日志"],
+             key="page", label_visibility="collapsed")
+    st.divider()
+
     # ── 用户信息 + 退出 ──
     user_email = st.session_state.get("user_email", "")
     st.markdown(
@@ -334,19 +570,26 @@ with st.sidebar:
     if st.button("退出登录", use_container_width=True, key="logout_btn"):
         api_logout()
         st.rerun()
-    st.divider()
 
-    st.header("📋 操作记录")
-    today_count = st.session_state.get("today_count", 0)
-    if today_count == 0:
-        st.caption("今天还没有记录。\n计算完成后点击「📌 保存本次记录」。")
-    else:
-        st.success(f"今日已保存 **{today_count}** 次记录")
-    st.divider()
-    st.caption("完整历史请查看「历史记录」Tab。")
+    # ── T+0 计算器专属：今日保存计数 ──
+    if st.session_state.get("page", "📊 T+0 计算器") == "📊 T+0 计算器":
+        st.divider()
+        st.caption("📋 **今日保存记录**")
+        today_count = st.session_state.get("today_count", 0)
+        if today_count == 0:
+            st.caption("还没有记录。计算完成后点击「保存本次记录」。")
+        else:
+            st.success(f"今日已保存 **{today_count}** 次记录")
+        st.caption("完整历史请查看「历史记录」Tab。")
 
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
+# ── 页面路由 ──────────────────────────────────────────────────────────────────
+if st.session_state.get("page") == "📓 交易日志":
+    show_journal_page()
+    st.stop()
+
+
+# ── T+0 计算器 Tabs ───────────────────────────────────────────────────────────
 tab3, tab1, tab2, tab4 = st.tabs(["正T", "反T", "反向计算", "📋 历史记录"])
 
 

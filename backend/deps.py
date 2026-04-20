@@ -41,4 +41,6 @@ async def require_auth(
     if not user.get("id"):
         raise HTTPException(status_code=401, detail="无效的用户信息")
 
+    # 注入原始 token，供需要 RLS 的接口（journal 等）使用
+    user["_token"] = token
     return user

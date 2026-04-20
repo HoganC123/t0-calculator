@@ -14,10 +14,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_URL   = os.getenv("SUPABASE_URL", "").rstrip("/")
-_KEY   = os.getenv("SUPABASE_KEY", "")
-_TABLE = f"{_URL}/rest/v1/trade_records"
-_AUTH  = f"{_URL}/auth/v1"
+_URL     = os.getenv("SUPABASE_URL", "").rstrip("/")
+_KEY     = os.getenv("SUPABASE_KEY", "")
+_TABLE   = f"{_URL}/rest/v1/trade_records"
+_JOURNAL = f"{_URL}/rest/v1/trade_journal"
+_AUTH    = f"{_URL}/auth/v1"
 
 
 # ── 公共 Header 构造 ───────────────────────────────────────────────────────────
@@ -41,6 +42,18 @@ def _auth_headers(token: str) -> dict:
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
     }
+
+
+def _user_headers(user_token: str, prefer: str = "") -> dict:
+    """使用用户 JWT 访问 PostgREST（让 RLS 生效）"""
+    h = {
+        "apikey":        _KEY,
+        "Authorization": f"Bearer {user_token}",
+        "Content-Type":  "application/json",
+    }
+    if prefer:
+        h["Prefer"] = prefer
+    return h
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -181,6 +194,49 @@ async def clear_trades(user_id: str) -> int:
         return 0
     deleted = resp.json()
     return len(deleted) if isinstance(deleted, list) else 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Journal 函数（使用用户 JWT，RLS 自动过滤）
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def save_journal(data: dict, user_token: str) -> dict:
+    """POST /rest/v1/trade_journal — 插入一条日志"""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            _JOURNAL,
+            json=data,
+            headers=_user_headers(user_token, "return=representation"),
+            timeout=10,
+        )
+    _raise(resp)
+    result = resp.json()
+    return result[0] if isinstance(result, list) and result else result
+
+
+async def list_journal(user_token: str) -> list[dict]:
+    """GET /rest/v1/trade_journal — 按日期倒序返回当前用户所有日志"""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            _JOURNAL,
+            params={"order": "trade_date.desc,created_at.desc", "limit": "1000"},
+            headers=_user_headers(user_token),
+            timeout=10,
+        )
+    _raise(resp)
+    return resp.json()
+
+
+async def delete_journal(record_id: str, user_token: str) -> None:
+    """DELETE /rest/v1/trade_journal?id=eq.<id> — RLS 保证只能删自己的记录"""
+    async with httpx.AsyncClient() as client:
+        resp = await client.delete(
+            _JOURNAL,
+            params={"id": f"eq.{record_id}"},
+            headers=_user_headers(user_token),
+            timeout=10,
+        )
+    _raise(resp)
 
 
 # ── 内部工具 ──────────────────────────────────────────────────────────────────
