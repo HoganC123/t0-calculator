@@ -407,9 +407,11 @@ with tab2:
             rv_sp = st.number_input("卖出价格（元）", min_value=0.0, value=0.0, step=0.01, format="%.3f", key="rv_sp")
 
         st.divider()
-        gap = rv_a - rv_b
-        if gap <= 0:
-            st.error("回补价格必须低于当前均价，否则操作会抬高成本。")
+        gap = rv_sp - rv_b          # 每股利润空间 = 卖出价 − 回补价
+        if rv_sp <= 0 or rv_b <= 0:
+            st.info("请输入卖出价格和回补价格。")
+        elif rv_b >= rv_sp:
+            st.error("回补价格必须低于卖出价格，否则低买高卖无法盈利。")
         elif rv_r <= 0:
             st.info("请输入正数的降低幅度。")
         else:
