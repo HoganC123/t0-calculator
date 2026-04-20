@@ -302,6 +302,9 @@ with tab1:
         net_sell_t1   = sell_amt_t1 - sell_comm_t1 - stamp_tax_t1
         be_rebuy      = net_sell_t1 / (sell_qty * 1.0003)
         gross_t1      = sell_qty * (sell_price - avg_cost)
+        # 若不回补：新均价 = (原总成本 - 卖出所得) / 剩余数量
+        no_rebuy_avg  = (holding_qty * avg_cost - sell_qty * sell_price) / remaining_qty \
+                        if remaining_qty > 0 else 0
 
         if use_target_rebuy:
             rebuy_amt_t1  = sell_qty * target_rebuy
@@ -318,8 +321,11 @@ with tab1:
 
         res1, res2, res3 = st.columns(3)
         pnl_card(res1, "T盈利（毛，未回补费用）", gross_t1)
+        avg_delta_no_rebuy = no_rebuy_avg - avg_cost if remaining_qty > 0 else 0
         res2.metric("若不回补：持仓均价",
-                    f"{avg_cost:.3f}" if remaining_qty > 0 else "—（全部卖出）")
+                    f"{no_rebuy_avg:.3f}" if remaining_qty > 0 else "—（全部卖出）",
+                    delta=f"{avg_delta_no_rebuy:+.3f}" if remaining_qty > 0 else None,
+                    delta_color="inverse")
         res3.metric("剩余持仓数量", f"{remaining_qty:,} 股")
 
         st.divider()
@@ -343,17 +349,16 @@ with tab1:
         if remaining_qty > 0:
             st.divider()
             st.markdown("#### ⚠️ 若股价继续上涨、无法回补")
-            cost_up = sell_qty * (sell_price - avg_cost) / remaining_qty
             ca, cb  = st.columns(2)
             ca.metric("失去的筹码（股）", f"{sell_qty:,}")
-            cb.metric("剩余持仓成本抬高（元/股）", f"{cost_up:.3f}",
-                      delta=f"{cost_up:+.3f}", delta_color="inverse")
+            cb.metric("不回补剩余持仓均价变化（元/股）", f"{avg_delta_no_rebuy:+.3f}",
+                      delta=f"{avg_delta_no_rebuy:+.3f}", delta_color="inverse")
 
         if use_target_rebuy:
             st.divider()
             st.markdown("#### ✅ 回补后综合成本")
             new_avg_t1 = (target_rebuy if remaining_qty == 0
-                          else (remaining_qty * avg_cost + sell_qty * target_rebuy) / holding_qty)
+                          else (remaining_qty * no_rebuy_avg + sell_qty * target_rebuy) / holding_qty)
             cost_delta = new_avg_t1 - avg_cost
             c1, c2, c3 = st.columns(3)
             c1.metric("新综合均价（元）", f"{new_avg_t1:.3f}",
