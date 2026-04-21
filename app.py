@@ -294,8 +294,8 @@ def show_journal_page():
     with st.expander("➕  记录新交易", expanded=not bool(st.session_state.get("jl_saved"))):
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
-            jl_code   = st.text_input("股票代码", placeholder="如：601899", key="jl_code")
-            jl_name   = st.text_input("股票名称", placeholder="如：紫金矿业", key="jl_name")
+            jl_code   = st.text_input("股票代码", key="jl_code")
+            jl_name   = st.text_input("股票名称", key="jl_name")
         with fc2:
             jl_action  = st.selectbox("操作类型", _ACTION_TYPES, key="jl_action")
             jl_emotion = st.selectbox("情绪标签", _EMOTIONS, key="jl_emotion")
@@ -306,9 +306,7 @@ def show_journal_page():
                                        step=100, key="jl_qty")
 
         jl_date   = st.date_input("成交日期", value=date.today(), key="jl_date")
-        jl_reason = st.text_area("交易理由（必填）",
-                                 placeholder="为什么进行这笔交易？入场逻辑是什么？",
-                                 key="jl_reason", height=90)
+        jl_reason = st.text_area("交易理由（必填）", key="jl_reason", height=90)
         jl_notes  = st.text_input("备注（可选）", key="jl_notes")
 
         st.markdown("<br>", unsafe_allow_html=True)
