@@ -181,6 +181,31 @@ def db_journal_delete(record_id) -> tuple[bool, str]:
         return False, _ERR_CONN if _unavailable(e) else str(e)
 
 
+def db_journal_lhb(stock_code: str) -> tuple[list, str]:
+    try:
+        resp = _req.get(f"{_API}/journal/lhb/{stock_code}",
+                        headers=_auth_hdr(), timeout=30)
+        if resp.status_code == 401:
+            _handle_expired()
+        resp.raise_for_status()
+        return resp.json(), ""
+    except Exception as e:
+        return [], _ERR_CONN if _unavailable(e) else str(e)
+
+
+@st.cache_data(show_spinner="正在加载A股股票列表…", ttl=3600)
+def load_stock_list() -> tuple[list[tuple[str, str]], str]:
+    try:
+        resp = _req.get(f"{_API}/journal/stocks", timeout=65)
+        resp.raise_for_status()
+        body = resp.json()
+        err  = body.get("error", "")
+        data = [(item["code"], item["name"]) for item in body.get("stocks", [])]
+        return data, err
+    except Exception as e:
+        return [], str(e)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 工具函数
 # ══════════════════════════════════════════════════════════════════════════════
@@ -458,8 +483,32 @@ def show_journal_page():
     with st.expander("➕  记录新交易", expanded=not bool(st.session_state.get("jl_saved"))):
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
-            jl_code   = st.text_input("股票代码", key="jl_code")
-            jl_name   = st.text_input("股票名称", key="jl_name")
+            _sl, _sl_err = load_stock_list()
+            if _sl:
+                st.caption(f"已加载 {len(_sl)} 只股票")
+                jl_search = st.text_input("🔍 股票搜索", key="jl_search",
+                                          placeholder="输入代码或名称，如：601899 或 紫金")
+                _q = jl_search.strip()
+                _matches = [(c, n) for c, n in _sl if _q in c or _q in n][:8] if _q else []
+                if _matches:
+                    _opts = ["— 请选择 —"] + [f"{c}  {n}" for c, n in _matches]
+                    _sel  = st.selectbox("", _opts, key="jl_stock_sel",
+                                         label_visibility="collapsed")
+                    if _sel and _sel != "— 请选择 —":
+                        _parts = _sel.split("  ", 1)
+                        jl_code = _parts[0].strip()
+                        jl_name = _parts[1].strip() if len(_parts) > 1 else ""
+                    else:
+                        jl_code = jl_name = ""
+                elif _q:
+                    st.caption("未找到匹配的A股股票")
+                    jl_code = jl_name = ""
+                else:
+                    jl_code = jl_name = ""
+            else:
+                st.caption("⚠️ 股票搜索暂时不可用，请手动输入")
+                jl_code = st.text_input("股票代码", key="jl_code_fb")
+                jl_name = st.text_input("股票名称", key="jl_name_fb")
         with fc2:
             jl_action  = st.selectbox("操作类型", _ACTION_TYPES, key="jl_action")
             jl_emotion = st.selectbox("情绪标签", _EMOTIONS, key="jl_emotion")
@@ -475,7 +524,9 @@ def show_journal_page():
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("💾  保存日志", type="primary", key="jl_save"):
-            if not jl_reason.strip():
+            if not jl_code.strip():
+                st.error("请搜索并选择股票")
+            elif not jl_reason.strip():
                 st.error("交易理由不能为空")
             elif jl_price <= 0:
                 st.error("请输入有效的成交价格")
@@ -640,6 +691,37 @@ def show_journal_page():
                 dm1.metric("成交价", f"{price:.3f} 元")
                 dm2.metric("数量",   f"{qty:,} 股")
                 dm3.metric("成交金额", f"{price * qty:,.2f} 元")
+
+                # ── 龙虎榜记录 ────────────────────────────────────────────────
+                st.markdown("---")
+                st.markdown("**📋 龙虎榜记录（近30日）**")
+                if not code:
+                    st.caption("请编辑此记录补充股票代码，以查询龙虎榜")
+                else:
+                    lhb_key = f"lhb_{rid}"
+                    if lhb_key not in st.session_state:
+                        with st.spinner("正在查询龙虎榜数据…"):
+                            lhb_data, lhb_err = db_journal_lhb(code)
+                            st.session_state[lhb_key] = (lhb_data, lhb_err)
+                    lhb_data, lhb_err = st.session_state[lhb_key]
+                    if lhb_err:
+                        st.warning(f"龙虎榜查询失败：{lhb_err}")
+                    elif not lhb_data:
+                        st.caption("近30日未上龙虎榜")
+                    else:
+                        rows = []
+                        for item in lhb_data:
+                            buy  = item.get("buy_amount")
+                            sell = item.get("sell_amount")
+                            net  = item.get("net_buy")
+                            rows.append({
+                                "日期":   item.get("date", ""),
+                                "上榜原因": item.get("reason", ""),
+                                "买入金额（万）": f"{buy/1e4:.1f}" if buy is not None else "—",
+                                "卖出金额（万）": f"{sell/1e4:.1f}" if sell is not None else "—",
+                                "净买入（万）":  f"{net/1e4:.1f}" if net is not None else "—",
+                            })
+                        st.dataframe(rows, use_container_width=True, hide_index=True)
             st.divider()
 
 

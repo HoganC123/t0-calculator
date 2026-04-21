@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import httpx
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -55,6 +58,65 @@ async def api_list(
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/stocks")
+async def api_stocks() -> Any:
+    """返回A股全部股票代码和名称（公开数据，无需登录）"""
+    import akshare as ak
+    try:
+        df = await asyncio.wait_for(
+            asyncio.to_thread(ak.stock_info_a_code_name),
+            timeout=60,
+        )
+        codes = df.iloc[:, 0].astype(str).str.strip().tolist()
+        names = df.iloc[:, 1].astype(str).str.strip().tolist()
+        return {"stocks": [{"code": c, "name": n} for c, n in zip(codes, names)], "error": ""}
+    except Exception as e:
+        return {"stocks": [], "error": f"股票列表暂时无法加载：{e}"}
+
+
+@router.get("/lhb/{stock_code}")
+async def api_lhb(
+    stock_code: str,
+    user: dict = Depends(require_auth),
+) -> Any:
+    """查询该股票近30天龙虎榜记录（最多5条）"""
+    import akshare as ak
+    end_date   = datetime.today().strftime("%Y%m%d")
+    start_date = (datetime.today() - timedelta(days=30)).strftime("%Y%m%d")
+    try:
+        df = await asyncio.to_thread(
+            ak.stock_lhb_detail_em, start_date=start_date, end_date=end_date
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AKShare 请求失败：{e}")
+
+    if df is None or df.empty:
+        return []
+
+    filtered = df[df.iloc[:, 1].astype(str).str.strip() == str(stock_code).strip()]
+    if filtered.empty:
+        return []
+
+    filtered = filtered.sort_values(by=filtered.columns[3], ascending=False).head(5)
+
+    def _safe(val):
+        try:
+            return None if pd.isna(val) else float(val)
+        except Exception:
+            return None
+
+    result = []
+    for _, row in filtered.iterrows():
+        result.append({
+            "date":        str(row.iloc[3])[:10],
+            "reason":      str(row.iloc[4]),
+            "buy_amount":  _safe(row.iloc[8]),
+            "sell_amount": _safe(row.iloc[9]),
+            "net_buy":     _safe(row.iloc[7]),
+        })
+    return result
 
 
 @router.delete("/delete/{record_id}")
