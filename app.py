@@ -1,8 +1,9 @@
 import streamlit as st
 import requests as _req
 from datetime import date
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="A股 T+0 辅助计算器", layout="wide")
+st.set_page_config(page_title="筹码本", layout="wide")
 
 # ── 样式 ──────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -29,6 +30,20 @@ st.markdown("""
 .save-bar { background:rgba(255,255,255,0.03); border-radius:8px; padding:14px 16px; margin-top:12px; }
 .pct-hint  { font-size:0.78rem; margin:-6px 0 6px 0; }
 
+/* 侧边栏底部固定用户信息 */
+[data-testid="stSidebarContent"] {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+}
+.sidebar-scroll { flex: 1 1 auto; overflow-y: auto; padding-bottom: 0.5rem; }
+.sidebar-bottom {
+    border-top: 1px solid rgba(255,255,255,0.08);
+    padding: 12px 0 4px 0;
+    background: #1a1d27;
+}
+
 @media (max-width:640px) {
     [data-testid="column"] { min-width:100% !important; flex:1 1 100% !important; }
     .stTabs [data-baseweb="tab"] { font-size:13px !important; padding:6px 10px !important; }
@@ -40,7 +55,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 A股 T+0 辅助计算器")
+st.markdown(
+    '<h1 style="margin-bottom:0">筹码本</h1>'
+    '<p style="color:rgba(250,250,250,0.45);font-size:0.9rem;margin-top:2px">A股散户决策工具</p>',
+    unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -342,17 +360,29 @@ def show_journal_page():
         for r in records:
             em = r.get("emotion", "冷静")
             em_counts[em] = em_counts.get(em, 0) + 1
-        for em in _EMOTIONS:
-            cnt = em_counts.get(em, 0)
-            pct = cnt / total * 100 if total else 0
-            bar_fill = int(pct / 5)
-            color = _EMOTION_COLOR[em]
-            st.markdown(
-                f'<p style="margin:5px 0;font-size:0.88rem">'
-                f'<span style="color:{color};font-weight:600;display:inline-block;width:3em">{em}</span>'
-                f'<span style="color:rgba(250,250,250,0.25)">{"█"*bar_fill}{"░"*(20-bar_fill)}</span>'
-                f'&nbsp;<span style="color:rgba(250,250,250,0.55)">{cnt} 次 {pct:.0f}%</span></p>',
-                unsafe_allow_html=True)
+        # 只显示有数据的情绪
+        pie_labels = [em for em in _EMOTIONS if em_counts.get(em, 0) > 0]
+        pie_values = [em_counts[em] for em in pie_labels]
+        pie_colors = [_EMOTION_COLOR[em] for em in pie_labels]
+        if pie_labels:
+            fig = go.Figure(data=[go.Pie(
+                labels=pie_labels,
+                values=pie_values,
+                marker=dict(colors=pie_colors,
+                            line=dict(color="#0e1117", width=2)),
+                textfont=dict(color="white", size=13),
+                textinfo="label+percent",
+                hovertemplate="%{label}: %{value} 次 (%{percent})<extra></extra>",
+                hole=0.35,
+            )])
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=0, r=0, t=10, b=10),
+                showlegend=False,
+                height=220,
+            )
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     with stat2:
         st.markdown("**最常交易 Top 3**")
@@ -556,20 +586,12 @@ if "token" not in st.session_state:
 
 # ── 侧边栏 ────────────────────────────────────────────────────────────────────
 with st.sidebar:
+    # ── 顶部可滚动区域开始 ──
+    st.markdown('<div class="sidebar-scroll">', unsafe_allow_html=True)
+
     # ── 工具导航 ──
     st.radio("", ["📊 T+0 计算器", "📓 交易日志"],
              key="page", label_visibility="collapsed")
-    st.divider()
-
-    # ── 用户信息 + 退出 ──
-    user_email = st.session_state.get("user_email", "")
-    st.markdown(
-        f'<p style="font-size:0.82rem;color:rgba(250,250,250,0.55);margin:0">当前用户</p>'
-        f'<p style="font-size:0.9rem;font-weight:600;margin:2px 0 8px 0">{user_email}</p>',
-        unsafe_allow_html=True)
-    if st.button("退出登录", use_container_width=True, key="logout_btn"):
-        api_logout()
-        st.rerun()
 
     # ── T+0 计算器专属：今日保存计数 ──
     if st.session_state.get("page", "📊 T+0 计算器") == "📊 T+0 计算器":
@@ -581,6 +603,21 @@ with st.sidebar:
         else:
             st.success(f"今日已保存 **{today_count}** 次记录")
         st.caption("完整历史请查看「历史记录」Tab。")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── 底部用户信息（固定在侧边栏底部）──
+    user_email = st.session_state.get("user_email", "")
+    st.markdown(
+        f'<div class="sidebar-bottom">'
+        f'<p style="font-size:0.75rem;color:rgba(250,250,250,0.4);margin:0 0 2px 0">当前账号</p>'
+        f'<p style="font-size:0.85rem;font-weight:600;margin:0 0 10px 0;'
+        f'word-break:break-all">{user_email}</p>'
+        f'</div>',
+        unsafe_allow_html=True)
+    if st.button("退出登录", use_container_width=True, key="logout_btn"):
+        api_logout()
+        st.rerun()
 
 
 # ── 页面路由 ──────────────────────────────────────────────────────────────────
