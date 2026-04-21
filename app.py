@@ -363,15 +363,16 @@ def show_position_page():
         st.divider()
         g1, g2, g3, g4 = st.columns(4)
         pnl_card(g1, "目标盈利（税后）", profit_net)
-        g2.metric("盈亏比",   f"1 : {rr:.2f}",
+        g2.metric("盈亏比（收益:风险）", f"{rr:.2f} : 1",
                   delta="良好" if rr >= 2 else ("尚可" if rr >= 1.5 else "偏低"),
-                  delta_color="off")
+                  delta_color="off",
+                  help=f"每承担 1 元风险，预期获得 {rr:.2f} 元收益")
         g3.metric("止损距离", f"-{stop_pct:.2f}%")
         g4.metric("目标涨幅", f"+{target_pct:.2f}%")
 
         if rr < 1.5:
-            st.warning(f"盈亏比 {rr:.2f} 偏低，建议盈亏比 ≥ 2:1，"
-                       "可考虑上移止损或调低目标价来减小风险。")
+            st.warning(f"盈亏比 {rr:.2f}:1 偏低，建议 ≥ 2:1，"
+                       "可考虑上移止损或调低目标价来改善。")
 
     # ── 风险级别提示 ──────────────────────────────────────────────────────────
     st.divider()
@@ -436,8 +437,8 @@ def show_position_page():
         c4_.markdown(f"{cum_shares:,}")
         c5_.markdown(f"**{avg_cost:.3f}**")
 
-    st.caption("参考价格按止损距离的 15% 逐批递减，供参考，实际操作可灵活调整。"
-               "  止损价固定，分批加仓不改变单笔最大亏损上限。")
+    st.caption("每批参考买入价逐步降低，越跌越买以摊薄成本；"
+               "无论分几批建仓，触及止损价时的最大亏损始终不超过你设定的上限。")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
