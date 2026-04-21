@@ -278,6 +278,169 @@ def save_section(key_prefix: str, trade_type: str, base_row: dict):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 仓位与止损计算器
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _pos_fees(buy_px: float, exit_px: float, qty: int) -> dict:
+    """计算一次完整交易的手续费（买入 + 卖出 + 印花税）"""
+    buy_amt  = buy_px  * qty
+    sell_amt = exit_px * qty
+    buy_comm  = max(buy_amt  * 0.0003, 5.0)
+    sell_comm = max(sell_amt * 0.0003, 5.0)
+    stamp     = sell_amt * 0.001
+    return {"buy_comm": buy_comm, "sell_comm": sell_comm,
+            "stamp": stamp, "total": buy_comm + sell_comm + stamp}
+
+
+def show_position_page():
+    st.subheader("📐 仓位与止损计算器")
+    st.caption("根据资金规模与风险承受能力，计算合理仓位和止损金额。")
+
+    # ── 输入区 ────────────────────────────────────────────────────────────────
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        p_capital  = st.number_input("总资金（元）",
+                        min_value=0.0, value=0.0, step=10000.0,
+                        format="%.2f", key="p_cap")
+        p_max_loss = st.number_input("单笔最大可承受亏损（元）",
+                        min_value=0.0, value=0.0, step=100.0,
+                        format="%.2f", key="p_loss")
+    with c2:
+        p_buy  = st.number_input("计划买入价格（元）",
+                    min_value=0.0, value=0.0, step=0.01,
+                    format="%.3f", key="p_buy")
+        p_stop = st.number_input("止损价格（元）",
+                    min_value=0.0, value=0.0, step=0.01,
+                    format="%.3f", key="p_stop")
+    with c3:
+        p_target = st.number_input("目标价格（元，可选）",
+                       min_value=0.0, value=0.0, step=0.01,
+                       format="%.3f", key="p_target")
+
+    st.divider()
+
+    # ── 输入校验 ──────────────────────────────────────────────────────────────
+    if p_capital <= 0 or p_max_loss <= 0 or p_buy <= 0 or p_stop <= 0:
+        st.info("请填写全部必填项：总资金、最大亏损、买入价、止损价。")
+        return
+    if p_stop >= p_buy:
+        st.error("止损价格必须低于买入价格。")
+        return
+    if p_target > 0 and p_target <= p_buy:
+        st.error("目标价格必须高于买入价格。")
+        return
+
+    # ── 核心计算 ──────────────────────────────────────────────────────────────
+    risk_per_share = p_buy - p_stop
+    shares = int(p_max_loss / risk_per_share // 100) * 100
+
+    if shares == 0:
+        st.warning("按当前参数计算，建议仓位不足 100 股。"
+                   "请增大最大亏损或缩小止损距离。")
+        return
+
+    buy_amount     = shares * p_buy
+    capital_ratio  = buy_amount / p_capital * 100
+    fees_stop      = _pos_fees(p_buy, p_stop, shares)
+    stop_loss_net  = shares * risk_per_share + fees_stop["total"]
+
+    # ── 核心结果 ──────────────────────────────────────────────────────────────
+    st.markdown("#### 核心结果")
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("建议买入数量",       f"{shares:,} 股")
+    r2.metric("实际动用资金",       f"{buy_amount:,.2f} 元")
+    r3.metric("占总资金比例",       f"{capital_ratio:.1f}%")
+    r4.metric("止损金额（含手续费）", f"{stop_loss_net:.2f} 元")
+
+    # ── 盈亏比（仅填目标价时显示）──
+    if p_target > 0:
+        fees_win      = _pos_fees(p_buy, p_target, shares)
+        profit_net    = shares * (p_target - p_buy) - fees_win["total"]
+        rr            = profit_net / stop_loss_net if stop_loss_net > 0 else 0
+        stop_pct      = (p_buy - p_stop) / p_buy * 100
+        target_pct    = (p_target - p_buy) / p_buy * 100
+
+        st.divider()
+        g1, g2, g3, g4 = st.columns(4)
+        pnl_card(g1, "目标盈利（税后）", profit_net)
+        g2.metric("盈亏比",   f"1 : {rr:.2f}",
+                  delta="良好" if rr >= 2 else ("尚可" if rr >= 1.5 else "偏低"),
+                  delta_color="off")
+        g3.metric("止损距离", f"-{stop_pct:.2f}%")
+        g4.metric("目标涨幅", f"+{target_pct:.2f}%")
+
+        if rr < 1.5:
+            st.warning(f"盈亏比 {rr:.2f} 偏低，建议盈亏比 ≥ 2:1，"
+                       "可考虑上移止损或调低目标价来减小风险。")
+
+    # ── 风险级别提示 ──────────────────────────────────────────────────────────
+    st.divider()
+    if capital_ratio < 30:
+        st.success(f"✅ 轻仓操作（{capital_ratio:.1f}%）— 风险可控")
+    elif capital_ratio < 60:
+        st.info(f"ℹ️ 中等仓位（{capital_ratio:.1f}%）— 注意止损执行")
+    elif capital_ratio < 80:
+        st.warning(f"⚠️ 重仓操作（{capital_ratio:.1f}%）— 严格执行止损")
+    else:
+        st.error(f"🚨 接近满仓（{capital_ratio:.1f}%）— 风险极高，谨慎操作")
+
+    # ── 手续费明细 ────────────────────────────────────────────────────────────
+    with st.expander("💰 手续费明细（止损情景）"):
+        f1, f2, f3, f4 = st.columns(4)
+        f1.metric("买入佣金",   f"{fees_stop['buy_comm']:.2f} 元")
+        f2.metric("卖出佣金",   f"{fees_stop['sell_comm']:.2f} 元")
+        f3.metric("印花税",     f"{fees_stop['stamp']:.2f} 元")
+        f4.metric("手续费合计", f"{fees_stop['total']:.2f} 元")
+        st.caption(f"不含手续费止损额 {shares * risk_per_share:.2f} 元"
+                   f"　+　手续费 {fees_stop['total']:.2f} 元"
+                   f"　= 实际损失 **{stop_loss_net:.2f} 元**")
+
+    # ── 分批建仓计划 ──────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### 分批建仓计划")
+
+    batches = st.slider("计划分几批买入", min_value=2, max_value=5,
+                        value=2, key="p_batches")
+
+    # 每批参考价格：在买入价到止损价之间均匀分布（间距为止损距离的15%）
+    price_step = risk_per_share * 0.15
+    # 每批股数（尽量均等，第一批吸收余数）
+    per_batch  = max(100, (shares // batches // 100) * 100)
+    allocated  = per_batch * batches
+    extra_lots = (shares - allocated) // 100          # 多出的整手
+    batch_qtys = [per_batch + (100 if i < extra_lots else 0)
+                  for i in range(batches)]
+
+    # 表头
+    h0, h1, h2, h3, h4, h5 = st.columns([0.6, 1.2, 1.8, 1.6, 1.4, 1.8])
+    for col, txt in zip([h0,h1,h2,h3,h4,h5],
+                        ["批次","数量（股）","参考价格（元）",
+                         "本批资金（元）","累计股数","累计均价（元）"]):
+        col.markdown(f"<span style='font-size:0.82rem;color:rgba(250,250,250,0.5)'>"
+                     f"{txt}</span>", unsafe_allow_html=True)
+
+    cum_shares = 0
+    cum_cost   = 0.0
+    for i, qty in enumerate(batch_qtys):
+        ref_px  = max(p_buy - i * price_step, p_stop * 1.02)
+        b_cost  = qty * ref_px
+        cum_shares += qty
+        cum_cost   += b_cost
+        avg_cost    = cum_cost / cum_shares
+
+        c0,c1_,c2_,c3_,c4_,c5_ = st.columns([0.6,1.2,1.8,1.6,1.4,1.8])
+        c0.markdown(f"第 {i+1} 批")
+        c1_.markdown(f"**{qty:,}**")
+        c2_.markdown(f"≤ **{ref_px:.3f}**")
+        c3_.markdown(f"{b_cost:,.2f}")
+        c4_.markdown(f"{cum_shares:,}")
+        c5_.markdown(f"**{avg_cost:.3f}**")
+
+    st.caption("参考价格按止损距离的 15% 逐批递减，供参考，实际操作可灵活调整。"
+               "  止损价固定，分批加仓不改变单笔最大亏损上限。")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 交易日志页面
 # ══════════════════════════════════════════════════════════════════════════════
 _ACTION_TYPES  = ["买入", "卖出", "加仓", "减仓"]
@@ -588,7 +751,7 @@ with st.sidebar:
     st.markdown('<div class="sidebar-scroll">', unsafe_allow_html=True)
 
     # ── 工具导航 ──
-    st.radio("", ["📊 T+0 计算器", "📓 交易日志"],
+    st.radio("", ["📊 T+0 计算器", "📓 交易日志", "📐 仓位计算"],
              key="page", label_visibility="collapsed")
 
     # ── T+0 计算器专属：今日保存计数 ──
@@ -621,6 +784,10 @@ with st.sidebar:
 # ── 页面路由 ──────────────────────────────────────────────────────────────────
 if st.session_state.get("page") == "📓 交易日志":
     show_journal_page()
+    st.stop()
+
+if st.session_state.get("page") == "📐 仓位计算":
+    show_position_page()
     st.stop()
 
 
