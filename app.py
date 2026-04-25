@@ -2,6 +2,7 @@ import streamlit as st
 import requests as _req
 from datetime import date
 import plotly.graph_objects as go
+import pandas as pd
 
 st.set_page_config(page_title="筹码本", layout="wide")
 
@@ -193,17 +194,166 @@ def db_journal_lhb(stock_code: str) -> tuple[list, str]:
         return [], _ERR_CONN if _unavailable(e) else str(e)
 
 
+def _set_proxy() -> None:
+    import os
+    os.environ["http_proxy"]  = "http://127.0.0.1:7890"
+    os.environ["https_proxy"] = "http://127.0.0.1:7890"
+
+
 @st.cache_data(show_spinner="正在加载A股股票列表…", ttl=3600)
 def load_stock_list() -> tuple[list[tuple[str, str]], str]:
     try:
-        resp = _req.get(f"{_API}/journal/stocks", timeout=65)
-        resp.raise_for_status()
-        body = resp.json()
-        err  = body.get("error", "")
-        data = [(item["code"], item["name"]) for item in body.get("stocks", [])]
-        return data, err
+        _set_proxy()
+        import akshare as ak
+        df = ak.stock_info_a_code_name()
+        codes = df.iloc[:, 0].astype(str).str.strip().tolist()
+        names = df.iloc[:, 1].astype(str).str.strip().tolist()
+        return list(zip(codes, names)), ""
+    except ImportError:
+        return [], "akshare 未安装，请执行：pip install akshare"
     except Exception as e:
         return [], str(e)
+
+
+def _disk_cache_path(code: str, start_str: str, end_str: str):
+    from pathlib import Path
+    cache_dir = Path(__file__).parent / ".stock_cache"
+    cache_dir.mkdir(exist_ok=True)
+    return cache_dir / f"{code}_{start_str}_{end_str}.pkl"
+
+
+def _fetch_via_akshare(code: str, start_str: str, end_str: str) -> pd.DataFrame:
+    """
+    不使用 `with` 上下文管理器——with 块的 __exit__ 会调用 shutdown(wait=True)，
+    导致 TimeoutError 抛出后仍阻塞等待线程结束。
+    改为手动创建 executor，超时后立即 shutdown(wait=False) 跳过等待。
+    """
+    import concurrent.futures
+    _set_proxy()
+    import akshare as ak
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(
+        ak.stock_zh_a_hist,
+        symbol=code, period="daily",
+        start_date=start_str, end_date=end_str,
+        adjust="qfq",
+    )
+    try:
+        result = future.result(timeout=8)
+        executor.shutdown(wait=False)
+        return result
+    except Exception:
+        executor.shutdown(wait=False)  # 超时/异常后不阻塞，线程后台自行结束
+        raise
+
+
+def _fetch_via_baostock(code: str, start_str: str, end_str: str) -> pd.DataFrame:
+    import os
+    import baostock as bs
+    # baostock 股票代码：6 开头=上海，其余=深圳
+    prefix = "sh" if code.startswith("6") else "sz"
+    bs_code = f"{prefix}.{code}"
+    sd = f"{start_str[:4]}-{start_str[4:6]}-{start_str[6:]}"
+    ed = f"{end_str[:4]}-{end_str[4:6]}-{end_str[6:]}"
+
+    # baostock 是国内服务，临时清除代理避免路由冲突
+    proxy_bak = {}
+    for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        proxy_bak[k] = os.environ.pop(k, None)
+
+    try:
+        bs.login()
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            "date,open,high,low,close,volume,amount,pctChg",
+            start_date=sd, end_date=ed,
+            frequency="d", adjustflag="2",  # 前复权
+        )
+        rows = []
+        while rs.error_code == "0" and rs.next():
+            rows.append(rs.get_row_data())
+        bs.logout()
+    finally:
+        for k, v in proxy_bak.items():
+            if v is not None:
+                os.environ[k] = v
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows, columns=rs.fields)
+    df = df.rename(columns={
+        "date": "日期", "close": "收盘", "volume": "成交量",
+        "pctChg": "涨跌幅", "open": "开盘", "high": "最高",
+        "low": "最低", "amount": "成交额",
+    })
+    for col in ["收盘", "成交量", "涨跌幅", "开盘", "最高", "最低"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=["收盘"]).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_stock_history(code: str, start_str: str, end_str: str) -> tuple[pd.DataFrame, str, str]:
+    """返回 (df, error_msg, source_label)。source_label 非空时前端展示数据来源。"""
+    import pickle
+
+    # 1. 磁盘缓存：同股票同日期范围直接复用
+    cache_path = _disk_cache_path(code, start_str, end_str)
+    if cache_path.exists():
+        try:
+            with open(cache_path, "rb") as f:
+                cached = pickle.load(f)
+            # 兼容旧缓存（只存 DataFrame）和新缓存（存 (df, source) 元组）
+            if isinstance(cached, tuple):
+                df, src = cached
+            else:
+                df, src = cached, "缓存"
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                return df, "", f"本地缓存（{src}）"
+        except Exception:
+            cache_path.unlink(missing_ok=True)
+
+    def _save_cache(df: pd.DataFrame, src: str) -> None:
+        try:
+            with open(cache_path, "wb") as f:
+                pickle.dump((df, src), f)
+        except Exception:
+            pass
+
+    # 2. 首选 akshare（8 秒强制超时）
+    ak_err = ""
+    try:
+        df = _fetch_via_akshare(code, start_str, end_str)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            _save_cache(df, "akshare")
+            return df, "", ""
+        ak_err = "返回空数据"
+    except ImportError:
+        ak_err = "akshare 未安装"
+    except Exception as e:
+        ak_err = str(e)
+
+    # 3. 备选 baostock（国内服务，无需代理，akshare 超时后立即执行）
+    bs_err = ""
+    try:
+        df = _fetch_via_baostock(code, start_str, end_str)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            _save_cache(df, "baostock")
+            return df, "", "baostock（国内直连）"
+        bs_err = "返回空数据"
+    except ImportError:
+        bs_err = "baostock 未安装，请执行：pip install baostock"
+    except Exception as e:
+        bs_err = str(e)
+
+    return pd.DataFrame(), (
+        f"历史数据获取失败。\n"
+        f"akshare：{ak_err}\n"
+        f"baostock：{bs_err}\n"
+        f"请检查网络，或执行 pip install baostock 后重试。"
+    ), ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -486,8 +636,7 @@ def show_journal_page():
             _sl, _sl_err = load_stock_list()
             if _sl:
                 st.caption(f"已加载 {len(_sl)} 只股票")
-                jl_search = st.text_input("🔍 股票搜索", key="jl_search",
-                                          placeholder="输入代码或名称，如：601899 或 紫金")
+                jl_search = st.text_input("🔍 股票搜索", key="jl_search", placeholder="")
                 _q = jl_search.strip()
                 _matches = [(c, n) for c, n in _sl if _q in c or _q in n][:8] if _q else []
                 if _matches:
@@ -726,6 +875,546 @@ def show_journal_page():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 策略回测
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _ind_macd(close_arr):
+    s     = pd.Series(close_arr)
+    ema12 = s.ewm(span=12, adjust=False).mean()
+    ema26 = s.ewm(span=26, adjust=False).mean()
+    dif   = ema12 - ema26
+    dea   = dif.ewm(span=9, adjust=False).mean()
+    return dif.values, dea.values
+
+def _ind_rsi(close_arr, period: int = 14):
+    s     = pd.Series(close_arr)
+    delta = s.diff()
+    avg_g = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
+    avg_l = (-delta).clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
+    rs    = avg_g / (avg_l + 1e-10)
+    return (100 - 100 / (1 + rs)).values
+
+def _ind_boll(close_arr, period: int = 20, k: float = 2.0):
+    s   = pd.Series(close_arr)
+    mid = s.rolling(period).mean()
+    std = s.rolling(period).std(ddof=1)
+    return mid.values, (mid + k * std).values, (mid - k * std).values
+
+
+def _calc_backtest(df: pd.DataFrame,
+                   buy_cfg: list,  buy_logic: str,
+                   sell_cfg: dict,
+                   initial_capital: float) -> tuple[list, list, dict]:
+    """
+    回测引擎：T+1 成交（信号日收盘触发，次日开盘价执行），全仓买入，整手（100股）。
+
+    buy_cfg  : 买入条件列表 [{"id": str, "enabled": bool, "x"?: float, "n"?: int}, ...]
+    buy_logic: "AND"（全部满足）或 "OR"（任一满足）
+    sell_cfg : 卖出条件字典 {"hold": {...}, "tp": {...}, "sl": {...}, ...}
+    """
+    df = df.copy()
+    df["日期"] = pd.to_datetime(df["日期"])
+    df = df.sort_values("日期").reset_index(drop=True)
+    n = len(df)
+    if n < 10:
+        return [], [], {}
+
+    close  = df["收盘"].astype(float).values
+    volume = df["成交量"].astype(float).values
+    pct_ch = df["涨跌幅"].astype(float).values if "涨跌幅" in df.columns else [0.0] * n
+    open_p = df["开盘"].astype(float).values if "开盘" in df.columns else close
+
+    # ── 预计算所有技术指标 ────────────────────────────────────────────────────
+    close_s = pd.Series(close)
+    vol_s   = pd.Series(volume)
+
+    # MA 缓存（按需计算各种周期）
+    _ma_cache: dict = {}
+    def _ma(p: int):
+        if p not in _ma_cache:
+            _ma_cache[p] = close_s.rolling(p, min_periods=p).mean().values
+        return _ma_cache[p]
+
+    # N 日最高 / 最低 缓存
+    _hi_cache: dict = {}
+    def _high(p: int):
+        if p not in _hi_cache:
+            _hi_cache[p] = close_s.rolling(p, min_periods=p).max().values
+        return _hi_cache[p]
+
+    _lo_cache: dict = {}
+    def _low(p: int):
+        if p not in _lo_cache:
+            _lo_cache[p] = close_s.rolling(p, min_periods=p).min().values
+        return _lo_cache[p]
+
+    dif, dea     = _ind_macd(close)
+    rsi14        = _ind_rsi(close, 14)
+    _, _, boll_lo = _ind_boll(close, 20)
+
+    vol_ma5  = vol_s.rolling(5, min_periods=5).mean().values
+    vol_prev = vol_s.shift(1).values   # 昨日成交量
+
+    # 连续下跌天数
+    consec_dn = [0] * n
+    for _i in range(1, n):
+        consec_dn[_i] = consec_dn[_i-1] + 1 if close[_i] < close[_i-1] else 0
+
+    # ── warmup（所有条件中所需最长回溯 + MACD 35 根稳定期）────────────────────
+    warmup = 35
+    for cond in buy_cfg:
+        if cond.get("enabled"):
+            cid = cond["id"]
+            if cid in ("ma_cross_up", "above_ma", "below_ma"):
+                warmup = max(warmup, int(cond.get("n", 20)) + 1)
+            elif cid in ("drawdown", "consec_down"):
+                warmup = max(warmup, int(cond.get("n", 20)))
+    for scid, scfg in sell_cfg.items():
+        if scfg.get("enabled") and scid in ("below_ma", "new_low"):
+            warmup = max(warmup, int(scfg.get("n", 20)))
+    if n <= warmup:
+        return [], [], {}
+
+    # ── 主循环 ────────────────────────────────────────────────────────────────
+    capital = float(initial_capital)
+    qty = 0;  buy_px = 0.0;  buy_dt = None;  buy_i = -1
+    trades: list[dict]     = []
+    equity_cur: list[dict] = []
+    tick = 0
+
+    for i in range(warmup, n):
+        px     = close[i]
+        equity = capital + qty * px
+        equity_cur.append({"date": str(df["日期"].iloc[i])[:10], "equity": round(equity, 2)})
+
+        # ── 卖出检查 ──────────────────────────────────────────────────────────
+        if qty > 0:
+            days_h     = i - buy_i
+            ret_pct    = (px / buy_px - 1) * 100
+            should_sell = False
+
+            sc = sell_cfg.get("hold", {})
+            if sc.get("enabled") and days_h >= int(sc.get("days", 20)):
+                should_sell = True
+            sc = sell_cfg.get("tp", {})
+            if sc.get("enabled") and ret_pct >= float(sc.get("pct", 10)):
+                should_sell = True
+            sc = sell_cfg.get("sl", {})
+            if sc.get("enabled") and ret_pct <= -float(sc.get("pct", 5)):
+                should_sell = True
+            sc = sell_cfg.get("macd_dead", {})
+            if sc.get("enabled") and i > 0:
+                if dif[i] < dea[i] and dif[i-1] >= dea[i-1]:
+                    should_sell = True
+            sc = sell_cfg.get("rsi_above", {})
+            if sc.get("enabled") and not pd.isna(rsi14[i]):
+                if rsi14[i] > float(sc.get("x", 70)):
+                    should_sell = True
+            sc = sell_cfg.get("below_ma", {})
+            if sc.get("enabled"):
+                mn = _ma(int(sc.get("n", 20)))
+                if not pd.isna(mn[i]) and px < mn[i]:
+                    should_sell = True
+            sc = sell_cfg.get("new_low", {})
+            if sc.get("enabled"):
+                lo = _low(int(sc.get("n", 20)))
+                if not pd.isna(lo[i]) and px <= lo[i]:
+                    should_sell = True
+
+            if should_sell:
+                sell_amt   = qty * px
+                s_comm     = max(sell_amt * 0.0003, 5.0)
+                proceeds   = sell_amt - s_comm - sell_amt * 0.001
+                buy_amt    = qty * buy_px
+                b_comm     = max(buy_amt * 0.0003, 5.0)
+                total_cost = buy_amt + b_comm
+                trades.append({
+                    "buy_date":   str(buy_dt)[:10],
+                    "buy_price":  round(buy_px, 3),
+                    "sell_date":  str(df["日期"].iloc[i])[:10],
+                    "sell_price": round(px, 3),
+                    "hold_days":  days_h,
+                    "pnl_pct":    round((proceeds - total_cost) / total_cost * 100, 2),
+                })
+                capital = proceeds
+                qty = 0;  buy_px = 0.0;  buy_dt = None;  buy_i = -1
+
+        # ── 买入信号检查（无持仓） ─────────────────────────────────────────────
+        else:
+            signals = []
+            for cond in buy_cfg:
+                if not cond.get("enabled"):
+                    continue
+                cid = cond["id"]
+                sig = False
+
+                if cid == "drop_pct":
+                    sig = float(pct_ch[i]) < -float(cond.get("x", 3))
+                elif cid == "vol_ma5":
+                    vm5 = vol_ma5[i-1] if i > 0 else 0
+                    sig = vm5 > 0 and volume[i] > vm5 * float(cond.get("x", 2))
+                elif cid == "ma_cross_up":
+                    mn = _ma(int(cond.get("n", 20)))
+                    sig = (not pd.isna(mn[i]) and not pd.isna(mn[i-1])
+                           and close[i] > mn[i] and close[i-1] <= mn[i-1])
+                elif cid == "interval":
+                    sig = tick % max(int(cond.get("n", 5)), 1) == 0
+                elif cid == "above_ma":
+                    mn  = _ma(int(cond.get("n", 20)))
+                    sig = not pd.isna(mn[i]) and close[i] > mn[i]
+                elif cid == "below_ma":
+                    mn  = _ma(int(cond.get("n", 20)))
+                    sig = not pd.isna(mn[i]) and close[i] < mn[i]
+                elif cid == "macd_golden":
+                    sig = i > 0 and dif[i] > dea[i] and dif[i-1] <= dea[i-1]
+                elif cid == "rsi_below":
+                    sig = not pd.isna(rsi14[i]) and rsi14[i] < float(cond.get("x", 30))
+                elif cid == "vol_yesterday":
+                    vy  = vol_prev[i]
+                    sig = vy > 0 and volume[i] > vy * float(cond.get("x", 2))
+                elif cid == "consec_down":
+                    sig = consec_dn[i] >= int(cond.get("n", 3))
+                elif cid == "drawdown":
+                    hi  = _high(int(cond.get("n", 60)))
+                    sig = (not pd.isna(hi[i]) and hi[i] > 0
+                           and (hi[i] - close[i]) / hi[i] * 100 >= float(cond.get("x", 10)))
+                elif cid == "boll_lower":
+                    sig = not pd.isna(boll_lo[i]) and close[i] < boll_lo[i] * 1.02
+
+                signals.append(sig)
+
+            tick += 1
+            fire = (all(signals) if buy_logic == "AND" else any(signals)) if signals else False
+
+            # T+1：次日开盘价执行
+            if fire and i + 1 < n:
+                exec_px = open_p[i + 1]
+                if capital > exec_px * 100:
+                    max_qty     = int((capital * 0.9997 - 5) / exec_px / 100) * 100
+                    actual_cost = max_qty * exec_px
+                    actual_comm = max(actual_cost * 0.0003, 5.0)
+                    if max_qty > 0 and actual_cost + actual_comm <= capital:
+                        capital -= actual_cost + actual_comm
+                        qty    = max_qty;  buy_px = exec_px
+                        buy_dt = df["日期"].iloc[i + 1];  buy_i = i + 1
+
+    # ── 末日强制平仓 ──────────────────────────────────────────────────────────
+    if qty > 0:
+        px         = close[-1]
+        sell_amt   = qty * px
+        proceeds   = sell_amt - max(sell_amt * 0.0003, 5.0) - sell_amt * 0.001
+        buy_amt    = qty * buy_px
+        total_cost = buy_amt + max(buy_amt * 0.0003, 5.0)
+        trades.append({
+            "buy_date":   str(buy_dt)[:10],
+            "buy_price":  round(buy_px, 3),
+            "sell_date":  str(df["日期"].iloc[-1])[:10],
+            "sell_price": round(px, 3),
+            "hold_days":  (n - 1) - buy_i,
+            "pnl_pct":    round((proceeds - total_cost) / total_cost * 100, 2),
+        })
+        capital = proceeds
+        if equity_cur:
+            equity_cur[-1]["equity"] = round(capital, 2)
+
+    final_eq  = capital
+    total_ret = (final_eq - initial_capital) / initial_capital * 100
+    n_cal = max((pd.to_datetime(equity_cur[-1]["date"]) -
+                 pd.to_datetime(equity_cur[0]["date"])).days, 1) if len(equity_cur) > 1 else 1
+    ann_ret = ((1 + total_ret / 100) ** (365.0 / n_cal) - 1) * 100
+
+    pnls     = [t["pnl_pct"] for t in trades] or [0.0]
+    win_rate = sum(1 for p in pnls if p > 0) / len(pnls) * 100
+    avg_ret  = sum(pnls) / len(pnls)
+    max_loss = min(pnls)
+
+    peak = 0.0;  max_dd = 0.0
+    for e in equity_cur:
+        v = e["equity"]
+        if v > peak: peak = v
+        if peak > 0:
+            dd = (peak - v) / peak * 100
+            if dd > max_dd: max_dd = dd
+
+    return trades, equity_cur, {
+        "total_trades":      len(trades),
+        "win_rate":          round(win_rate, 1),
+        "avg_return":        round(avg_ret, 2),
+        "max_loss":          round(max_loss, 2),
+        "max_drawdown":      round(max_dd, 2),
+        "total_return":      round(total_ret, 2),
+        "annualized_return": round(ann_ret, 2),
+        "final_equity":      round(final_eq, 2),
+    }
+
+
+def show_backtest_page():
+    st.subheader("📈 策略回测")
+    st.warning("⚠️ 回测结果基于历史数据，不代表未来收益，仅供参考", icon="⚠️")
+
+    # ── 参数设置 ──────────────────────────────────────────────────────────────
+    st.markdown("#### ⚙️ 参数设置")
+    pa, pb, pc = st.columns([1.2, 1, 1])
+    with pa:
+        st.markdown("**股票**")
+        bt_code = st.text_input("股票代码", key="bt_code", placeholder="")
+        bt_name = st.text_input("股票名称", key="bt_name", placeholder="")
+    with pb:
+        st.markdown("**回测区间**")
+        bt_start = st.date_input("开始日期", value=date(2023, 1, 1), key="bt_start")
+        bt_end   = st.date_input("结束日期", value=date.today(), key="bt_end")
+    with pc:
+        st.markdown("**资金 & 手续费**")
+        bt_capital = st.number_input("初始资金（元）", min_value=10000,
+                                     value=100000, step=10000, key="bt_capital")
+        st.caption("佣金万分之三（最低5元）· 印花税 0.1%")
+
+    st.divider()
+
+    # ── 买入条件（多选 + AND/OR 逻辑）────────────────────────────────────────
+    _hdr_l, _hdr_r = st.columns([3, 1.2])
+    with _hdr_l:
+        st.markdown("**📥 买入条件**（可多选）")
+    with _hdr_r:
+        _and_mode = st.toggle("全部满足（AND）", value=True, key="bt_buy_and")
+    buy_logic = "AND" if _and_mode else "OR"
+    st.caption(f"逻辑：{'需同时满足所有勾选条件' if buy_logic == 'AND' else '满足任一勾选条件即触发'}")
+
+    # 条件定义：(id, 显示文本, [(参数key, 标签, 默认值, step, min)])
+    _BUY_DEFS = [
+        ("drop_pct",    "单日跌幅超过 X%",              [("x", "跌幅 X%",    3.0, 0.5, 0.1)]),
+        ("vol_ma5",     "成交量超过 5 日均量 X 倍",      [("x", "倍数 X",     2.0, 0.5, 0.1)]),
+        ("ma_cross_up", "价格上穿 N 日均线（金叉）",     [("n", "N 天",       20,  1,   2  )]),
+        ("interval",    "每隔 N 个交易日定投一次",       [("n", "间隔 N 天",  5,   1,   1  )]),
+        ("above_ma",    "股价在 N 日均线之上（趋势过滤）",[("n", "N 天",       20,  1,   2  )]),
+        ("below_ma",    "股价在 N 日均线之下（超跌过滤）",[("n", "N 天",       20,  1,   2  )]),
+        ("macd_golden", "MACD 金叉（DIF 上穿 DEA）",    []),
+        ("rsi_below",   "RSI 低于 X（超卖，默认30）",   [("x", "RSI 阈值",   30,  5,   1  )]),
+        ("vol_yesterday","成交量比昨日放大 X 倍",        [("x", "倍数 X",     2.0, 0.5, 0.1)]),
+        ("consec_down", "连续下跌 N 天后买入",          [("n", "N 天",       3,   1,   1  )]),
+        ("drawdown",    "距 N 日最高点回撤超过 X%",     [("n", "N 天",       60,  5,   5  ),
+                                                         ("x", "回撤 X%",    10.0,1.0, 1.0)]),
+        ("boll_lower",  "布林带下轨附近（20日，下轨×1.02）",[]),
+    ]
+
+    buy_cfg = []
+    for cid, label, params in _BUY_DEFS:
+        n_p = len(params)
+        cols = st.columns([2.6] + [0.9] * n_p) if n_p else [st.columns(1)[0]]
+        with cols[0]:
+            enabled = st.checkbox(label, key=f"bc_{cid}")
+        item: dict = {"id": cid, "enabled": enabled}
+        for j, (pk, plabel, pdef, pstep, pmin) in enumerate(params):
+            with cols[j + 1]:
+                is_int = isinstance(pdef, int)
+                raw = st.number_input(
+                    plabel,
+                    min_value=int(pmin) if is_int else float(pmin),
+                    value=int(pdef) if is_int else float(pdef),
+                    step=int(pstep) if is_int else float(pstep),
+                    key=f"bc_{cid}_{pk}",
+                    disabled=not enabled,
+                    label_visibility="collapsed",
+                )
+                item[pk] = int(raw) if is_int else float(raw)
+        buy_cfg.append(item)
+
+    st.divider()
+
+    # ── 卖出条件（多选）──────────────────────────────────────────────────────
+    st.markdown("**📤 卖出条件**（至少选一项）")
+
+    _SELL_DEFS = [
+        ("hold",      "持有超过 N 天强制卖出",       [("days","N 天",    20,  1,   1  )]),
+        ("tp",        "盈利达到 X% 止盈",            [("pct", "止盈 X%", 10.0,0.5, 0.1)]),
+        ("sl",        "亏损达到 X% 止损",            [("pct", "止损 X%", 5.0, 0.5, 0.1)]),
+        ("macd_dead", "MACD 死叉（DIF 下穿 DEA）",  []),
+        ("rsi_above", "RSI 高于 X（超买，默认70）",  [("x",   "RSI 阈值",70,  5,   1  )]),
+        ("below_ma",  "跌破 N 日均线卖出",           [("n",   "N 天",    20,  1,   2  )]),
+        ("new_low",   "股价创 N 日新低卖出",         [("n",   "N 天",    20,  1,   2  )]),
+    ]
+
+    # 3 列布局排列卖出条件
+    sell_cfg: dict = {}
+    _sell_items = []
+    for scid, slabel, sparams in _SELL_DEFS:
+        n_p = len(sparams)
+        cols = st.columns([2.6] + [0.9] * n_p) if n_p else [st.columns(1)[0]]
+        with cols[0]:
+            s_enabled = st.checkbox(slabel, key=f"sc_{scid}")
+        s_item: dict = {"enabled": s_enabled}
+        for j, (pk, plabel, pdef, pstep, pmin) in enumerate(sparams):
+            with cols[j + 1]:
+                is_int = isinstance(pdef, int)
+                raw = st.number_input(
+                    plabel,
+                    min_value=int(pmin) if is_int else float(pmin),
+                    value=int(pdef) if is_int else float(pdef),
+                    step=int(pstep) if is_int else float(pstep),
+                    key=f"sc_{scid}_{pk}",
+                    disabled=not s_enabled,
+                    label_visibility="collapsed",
+                )
+                s_item[pk] = int(raw) if is_int else float(raw)
+        sell_cfg[scid] = s_item
+
+    # ── 运行回测 ──────────────────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("▶️ 开始回测", type="primary", key="bt_run"):
+        active_buy  = [c for c in buy_cfg  if c.get("enabled")]
+        active_sell = [k for k, v in sell_cfg.items() if v.get("enabled")]
+        if not bt_code:
+            st.error("请先输入股票代码")
+        elif bt_start >= bt_end:
+            st.error("开始日期必须早于结束日期")
+        elif not active_buy:
+            st.error("请至少勾选一个买入条件")
+        elif not active_sell:
+            st.error("请至少勾选一个卖出条件")
+        else:
+            _label = f"{bt_code}" + (f" {bt_name}" if bt_name.strip() else "")
+            with st.spinner(f"正在获取 {_label} 历史数据，请稍候…"):
+                df_hist, hist_err, data_src = fetch_stock_history(
+                    bt_code.strip(),
+                    bt_start.strftime("%Y%m%d"),
+                    bt_end.strftime("%Y%m%d"),
+                )
+            if hist_err:
+                st.error(hist_err)
+                st.info("💡 建议先用较短的时间范围测试，例如最近半年（6个月）")
+            elif df_hist.empty:
+                st.error("未获取到行情数据，请检查股票代码和日期范围")
+            else:
+                if data_src:
+                    st.info(f"数据来源：{data_src}", icon="ℹ️")
+                trades, equity_cur, metrics = _calc_backtest(
+                    df_hist, buy_cfg, buy_logic, sell_cfg, float(bt_capital),
+                )
+                st.session_state["bt_result"] = {
+                    "trades":     trades,
+                    "equity_cur": equity_cur,
+                    "metrics":    metrics,
+                    "df_hist":    df_hist,
+                    "capital":    bt_capital,
+                    "stock":      f"{bt_name}（{bt_code}）",
+                    "data_src":   data_src,
+                }
+                st.rerun()
+
+    # ── 回测结果 ──────────────────────────────────────────────────────────────
+    res = st.session_state.get("bt_result")
+    if not res:
+        return
+
+    trades     = res["trades"]
+    equity_cur = res["equity_cur"]
+    m          = res["metrics"]
+    df_hist    = res["df_hist"]
+    cap        = res["capital"]
+    stk        = res["stock"]
+    data_src   = res.get("data_src", "")
+
+    st.divider()
+    src_tag = f"　<small style='color:rgba(250,250,250,0.4)'>数据来源：{data_src}</small>" if data_src else ""
+    st.markdown(f"#### 📊 回测结果 — {stk}{src_tag}", unsafe_allow_html=True)
+
+    # 核心指标
+    r1, r2, r3, r4 = st.columns(4)
+    tr  = m["total_return"];  ann = m["annualized_return"]
+    clr = "normal" if tr >= 0 else "inverse"
+    r1.metric("总收益率",   f"{tr:+.2f}%",
+              delta=f"年化 {ann:+.2f}%", delta_color=clr)
+    r2.metric("最终资金",   f"{m['final_equity']:,.2f} 元")
+    r3.metric("总交易次数", f"{m['total_trades']} 次")
+    r4.metric("胜率",       f"{m['win_rate']:.1f}%")
+
+    r5, r6, r7, r8 = st.columns(4)
+    r5.metric("平均每笔收益", f"{m['avg_return']:+.2f}%")
+    r6.metric("最大单笔亏损", f"{m['max_loss']:.2f}%")
+    r7.metric("最大回撤",     f"{m['max_drawdown']:.2f}%")
+    r8.metric("初始资金",     f"{cap:,.0f} 元")
+
+    # 图表
+    tab_eq, tab_kl = st.tabs(["📈 资金曲线", "📊 交易标注"])
+
+    with tab_eq:
+        fig_eq = go.Figure()
+        fig_eq.add_trace(go.Scatter(
+            x=[e["date"]   for e in equity_cur],
+            y=[e["equity"] for e in equity_cur],
+            mode="lines", name="账户净值",
+            line=dict(color="#4ade80", width=2),
+            fill="tozeroy", fillcolor="rgba(74,222,128,0.07)",
+        ))
+        fig_eq.add_hline(y=cap, line_dash="dot",
+                          line_color="rgba(250,250,250,0.3)",
+                          annotation_text="初始资金",
+                          annotation_font_color="rgba(250,250,250,0.5)")
+        fig_eq.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font_color="rgba(250,250,250,0.8)",
+            xaxis=dict(showgrid=False),
+            yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.06)",
+                       tickformat=",.0f"),
+            height=360, margin=dict(l=10, r=10, t=30, b=10),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_eq, use_container_width=True)
+
+    with tab_kl:
+        _df = df_hist.copy()
+        _df["日期"] = pd.to_datetime(_df["日期"]).astype(str)
+        fig_kl = go.Figure()
+        fig_kl.add_trace(go.Scatter(
+            x=_df["日期"], y=_df["收盘"].astype(float),
+            mode="lines", name="收盘价",
+            line=dict(color="rgba(250,250,250,0.6)", width=1.5),
+        ))
+        if trades:
+            fig_kl.add_trace(go.Scatter(
+                x=[t["buy_date"]   for t in trades],
+                y=[t["buy_price"]  for t in trades],
+                mode="markers", name="买入",
+                marker=dict(symbol="triangle-up", size=13, color="#21c55d"),
+                hovertemplate="%{x}<br>买入 %{y:.3f}<extra></extra>",
+            ))
+            fig_kl.add_trace(go.Scatter(
+                x=[t["sell_date"]  for t in trades],
+                y=[t["sell_price"] for t in trades],
+                mode="markers", name="卖出",
+                marker=dict(symbol="triangle-down", size=13, color="#ff4b4b"),
+                hovertemplate="%{x}<br>卖出 %{y:.3f}<extra></extra>",
+            ))
+        fig_kl.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font_color="rgba(250,250,250,0.8)",
+            xaxis=dict(showgrid=False),
+            yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.06)"),
+            height=380, margin=dict(l=10, r=10, t=30, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_kl, use_container_width=True)
+
+    # 交易明细
+    if trades:
+        st.markdown("#### 📋 交易明细")
+        st.dataframe(
+            [{
+                "买入日期": t["buy_date"],
+                "买入价":   f"{t['buy_price']:.3f}",
+                "卖出日期": t["sell_date"],
+                "卖出价":   f"{t['sell_price']:.3f}",
+                "持有天数": t["hold_days"],
+                "盈亏%":    f"{t['pnl_pct']:+.2f}%",
+            } for t in trades],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("回测期间内未触发任何交易，请适当放宽买入条件或扩大回测区间")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 用户认证
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -834,7 +1523,7 @@ with st.sidebar:
     st.markdown('<div class="sidebar-scroll">', unsafe_allow_html=True)
 
     # ── 工具导航 ──
-    st.radio("", ["📊 T+0 计算器", "📓 交易日志", "📐 仓位计算"],
+    st.radio("", ["📊 T+0 计算器", "📓 交易日志", "📐 仓位计算", "📈 策略回测"],
              key="page", label_visibility="collapsed")
 
     # ── T+0 计算器专属：今日保存计数 ──
@@ -871,6 +1560,10 @@ if st.session_state.get("page") == "📓 交易日志":
 
 if st.session_state.get("page") == "📐 仓位计算":
     show_position_page()
+    st.stop()
+
+if st.session_state.get("page") == "📈 策略回测":
+    show_backtest_page()
     st.stop()
 
 
