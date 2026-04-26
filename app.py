@@ -1519,6 +1519,12 @@ def api_login(email: str, password: str,
             print(f"[DEBUG] api_login: HTTP {resp.status_code}，响应体 = {resp.text[:200]}")
             if resp.status_code == 400:
                 return False, "邮箱或密码错误"
+            if resp.status_code == 401:
+                # 旧 session 冲突，等待后重试
+                last_err = f"401 session冲突（第{attempt+1}次）"
+                if attempt < max_tries - 1:
+                    time.sleep(retry_delay)
+                continue
             resp.raise_for_status()
             data = resp.json()
             import time as _time
