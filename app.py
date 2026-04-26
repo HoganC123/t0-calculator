@@ -1124,16 +1124,39 @@ def _ind_boll(close_arr, period: int = 20, k: float = 2.0):
 
 
 def _calc_backtest(df: pd.DataFrame,
-                   buy_cfg: list,  buy_logic: str,
+                   buy_cfg: list, buy_logic: str,
                    sell_cfg: dict,
-                   initial_capital: float) -> tuple[list, list, dict]:
+                   initial_capital: float,
+                   pos_cfg: dict | None = None) -> tuple[list, list, dict]:
     """
-    回测引擎：T+1 成交（信号日收盘触发，次日开盘价执行），全仓买入，整手（100股）。
+    回测引擎 v2：T+1 成交（信号日收盘触发，次日开盘执行），整手（100股）。
+    支持多次加仓、仓位分配策略（平摊/保守金字塔/激进金字塔）、统一/FIFO 卖出。
 
-    buy_cfg  : 买入条件列表 [{"id": str, "enabled": bool, "x"?: float, "n"?: int}, ...]
-    buy_logic: "AND"（全部满足）或 "OR"（任一满足）
-    sell_cfg : 卖出条件字典 {"hold": {...}, "tp": {...}, "sl": {...}, ...}
+    pos_cfg 键：
+        max_adds(int)       最大加仓次数，0=不加仓（原逻辑）
+        add_drop_pct(float) 加仓触发：距上次买入价再跌 X%
+        alloc_mode(str)     equal | pyramid_safe | pyramid_aggressive
+        sell_mode(str)      all（均价统一卖出）| fifo（逐笔独立计算）
     """
+    # ── 仓位管理参数 ──────────────────────────────────────────────────────────
+    _pc       = pos_cfg or {}
+    max_adds  = max(0, int(_pc.get("max_adds", 0)))
+    add_drop  = float(_pc.get("add_drop_pct", 3.0))
+    alloc_m   = str(_pc.get("alloc_mode", "equal"))
+    sell_mode = str(_pc.get("sell_mode", "all"))
+    n_slots   = 1 + max_adds
+
+    def _weights(mode, n):
+        _s = {1:[1.], 2:[.6,.4], 3:[.5,.33,.17],
+              4:[.4,.3,.2,.1], 5:[.35,.28,.20,.12,.05]}
+        _a = {1:[1.], 2:[.4,.6], 3:[.17,.33,.5],
+              4:[.1,.2,.3,.4], 5:[.05,.12,.20,.28,.35]}
+        if mode == "pyramid_safe":       return _s.get(n, [1/n]*n)
+        if mode == "pyramid_aggressive": return _a.get(n, [1/n]*n)
+        return [1/n] * n
+    w_list = _weights(alloc_m, n_slots)
+
+    # ── 数据准备 ──────────────────────────────────────────────────────────────
     df = df.copy()
     df["日期"] = pd.to_datetime(df["日期"])
     df = df.sort_values("日期").reset_index(drop=True)
@@ -1144,20 +1167,17 @@ def _calc_backtest(df: pd.DataFrame,
     close  = df["收盘"].astype(float).values
     volume = df["成交量"].astype(float).values
     pct_ch = df["涨跌幅"].astype(float).values if "涨跌幅" in df.columns else [0.0] * n
-    open_p = df["开盘"].astype(float).values if "开盘" in df.columns else close
+    open_p = df["开盘"].astype(float).values   if "开盘"  in df.columns else close
 
-    # ── 预计算所有技术指标 ────────────────────────────────────────────────────
     close_s = pd.Series(close)
     vol_s   = pd.Series(volume)
 
-    # MA 缓存（按需计算各种周期）
     _ma_cache: dict = {}
     def _ma(p: int):
         if p not in _ma_cache:
             _ma_cache[p] = close_s.rolling(p, min_periods=p).mean().values
         return _ma_cache[p]
 
-    # N 日最高 / 最低 缓存
     _hi_cache: dict = {}
     def _high(p: int):
         if p not in _hi_cache:
@@ -1170,19 +1190,16 @@ def _calc_backtest(df: pd.DataFrame,
             _lo_cache[p] = close_s.rolling(p, min_periods=p).min().values
         return _lo_cache[p]
 
-    dif, dea     = _ind_macd(close)
-    rsi14        = _ind_rsi(close, 14)
+    dif, dea      = _ind_macd(close)
+    rsi14         = _ind_rsi(close, 14)
     _, _, boll_lo = _ind_boll(close, 20)
-
     vol_ma5  = vol_s.rolling(5, min_periods=5).mean().values
-    vol_prev = vol_s.shift(1).values   # 昨日成交量
+    vol_prev = vol_s.shift(1).values
 
-    # 连续下跌天数
     consec_dn = [0] * n
     for _i in range(1, n):
         consec_dn[_i] = consec_dn[_i-1] + 1 if close[_i] < close[_i-1] else 0
 
-    # ── warmup（所有条件中所需最长回溯 + MACD 35 根稳定期）────────────────────
     warmup = 35
     for cond in buy_cfg:
         if cond.get("enabled"):
@@ -1197,160 +1214,213 @@ def _calc_backtest(df: pd.DataFrame,
     if n <= warmup:
         return [], [], {}
 
-    # ── 主循环 ────────────────────────────────────────────────────────────────
+    # ── 状态 ──────────────────────────────────────────────────────────────────
     capital = float(initial_capital)
-    qty = 0;  buy_px = 0.0;  buy_dt = None;  buy_i = -1
-    trades: list[dict]     = []
-    equity_cur: list[dict] = []
-    tick = 0
+    # 持仓列表：每笔 {qty, cost_px, buy_date, buy_i, add_num}
+    positions: list[dict] = []
+    add_count    = 0      # 本轮已加仓次数
+    last_buy_px  = 0.0    # 上次买入执行价（用于加仓触发判断）
+    slot_caps: list[float] = []   # 本轮各槽位可用资金
 
+    trades:     list[dict] = []
+    equity_cur: list[dict] = []
+    max_pos_ratio  = 0.0
+    total_add_buys = 0
+    tick           = 0
+
+    # ── 内部工具函数 ──────────────────────────────────────────────────────────
+    def _make_rec(p: dict, sell_px: float, sell_date_s: str, sell_i: int):
+        """生成一笔交易记录，返回 (record_dict, proceeds)"""
+        sell_amt = p["qty"] * sell_px
+        s_comm   = max(sell_amt * 0.0003, 5.0)
+        proceeds = sell_amt - s_comm - sell_amt * 0.001
+        buy_amt  = p["qty"] * p["cost_px"]
+        b_comm   = max(buy_amt * 0.0003, 5.0)
+        cost     = buy_amt + b_comm
+        return {
+            "buy_date":   str(p["buy_date"])[:10],
+            "buy_price":  round(p["cost_px"], 3),
+            "sell_date":  sell_date_s,
+            "sell_price": round(sell_px, 3),
+            "qty":        p["qty"],
+            "add_num":    p["add_num"],
+            "hold_days":  sell_i - p["buy_i"],
+            "pnl_pct":    round((proceeds - cost) / cost * 100, 2),
+            "pnl_amt":    round(proceeds - cost, 2),
+        }, proceeds
+
+    def _tp_sl_hold(cost_px: float, cur_i: int, days_h: int) -> bool:
+        """止盈 / 止损 / 最长持有——基于单笔成本（FIFO 逐笔模式用）"""
+        r = (close[cur_i] / cost_px - 1) * 100
+        sc = sell_cfg.get("tp", {})
+        if sc.get("enabled") and r >= float(sc.get("pct", 10)): return True
+        sc = sell_cfg.get("sl", {})
+        if sc.get("enabled") and r <= -float(sc.get("pct", 5)):  return True
+        sc = sell_cfg.get("hold", {})
+        if sc.get("enabled") and days_h >= int(sc.get("days", 20)): return True
+        return False
+
+    def _global_conds(cur_i: int) -> bool:
+        """MACD / RSI / 均线 / 新低等市场信号——任一满足即全部平仓"""
+        px = close[cur_i]
+        sc = sell_cfg.get("macd_dead", {})
+        if sc.get("enabled") and cur_i > 0 and dif[cur_i] < dea[cur_i] and dif[cur_i-1] >= dea[cur_i-1]:
+            return True
+        sc = sell_cfg.get("rsi_above", {})
+        if sc.get("enabled") and not pd.isna(rsi14[cur_i]) and rsi14[cur_i] > float(sc.get("x", 70)):
+            return True
+        sc = sell_cfg.get("below_ma", {})
+        if sc.get("enabled"):
+            mn = _ma(int(sc.get("n", 20)))
+            if not pd.isna(mn[cur_i]) and px < mn[cur_i]: return True
+        sc = sell_cfg.get("new_low", {})
+        if sc.get("enabled"):
+            lo = _low(int(sc.get("n", 20)))
+            if not pd.isna(lo[cur_i]) and px <= lo[cur_i]: return True
+        return False
+
+    def _all_sell_conds(avg_cost: float, days_h: int, cur_i: int) -> bool:
+        """统一卖出模式：所有卖出条件（含止盈止损 + 市场信号）"""
+        return _tp_sl_hold(avg_cost, cur_i, days_h) or _global_conds(cur_i)
+
+    def _close_all(sell_px: float, sell_date_s: str, sell_i: int) -> None:
+        nonlocal capital, add_count, last_buy_px, slot_caps
+        for p in positions:
+            rec, proc = _make_rec(p, sell_px, sell_date_s, sell_i)
+            trades.append(rec)
+            capital += proc
+        positions.clear()
+        add_count = 0; last_buy_px = 0.0; slot_caps = []
+
+    def _do_buy(slot_idx: int, exec_px: float, exec_i: int, is_add: bool) -> bool:
+        nonlocal capital, add_count, total_add_buys, last_buy_px
+        alloc    = min(slot_caps[slot_idx] if slot_idx < len(slot_caps) else 0.0, capital)
+        if alloc < exec_px * 100: return False
+        max_qty  = int((alloc * 0.9997 - 5.0) / exec_px / 100) * 100
+        act_cost = max_qty * exec_px
+        act_comm = max(act_cost * 0.0003, 5.0)
+        if max_qty <= 0 or act_cost + act_comm > capital: return False
+        capital -= act_cost + act_comm
+        if is_add:
+            add_count      += 1
+            total_add_buys += 1
+            an = add_count
+        else:
+            an = 0
+        positions.append({"qty": max_qty, "cost_px": exec_px,
+                           "buy_date": df["日期"].iloc[exec_i],
+                           "buy_i": exec_i, "add_num": an})
+        last_buy_px = exec_px
+        return True
+
+    # ── 主循环 ────────────────────────────────────────────────────────────────
     for i in range(warmup, n):
-        px     = close[i]
-        equity = capital + qty * px
+        px        = close[i]
+        total_qty = sum(p["qty"] for p in positions)
+        equity    = capital + total_qty * px
         equity_cur.append({"date": str(df["日期"].iloc[i])[:10], "equity": round(equity, 2)})
 
-        # ── 卖出检查 ──────────────────────────────────────────────────────────
-        if qty > 0:
-            days_h     = i - buy_i
-            ret_pct    = (px / buy_px - 1) * 100
-            should_sell = False
+        # 记录最大仓位占比
+        if total_qty > 0:
+            invested = sum(p["qty"] * p["cost_px"] for p in positions)
+            ratio    = invested / initial_capital * 100
+            if ratio > max_pos_ratio: max_pos_ratio = ratio
 
-            sc = sell_cfg.get("hold", {})
-            if sc.get("enabled") and days_h >= int(sc.get("days", 20)):
-                should_sell = True
-            sc = sell_cfg.get("tp", {})
-            if sc.get("enabled") and ret_pct >= float(sc.get("pct", 10)):
-                should_sell = True
-            sc = sell_cfg.get("sl", {})
-            if sc.get("enabled") and ret_pct <= -float(sc.get("pct", 5)):
-                should_sell = True
-            sc = sell_cfg.get("macd_dead", {})
-            if sc.get("enabled") and i > 0:
-                if dif[i] < dea[i] and dif[i-1] >= dea[i-1]:
-                    should_sell = True
-            sc = sell_cfg.get("rsi_above", {})
-            if sc.get("enabled") and not pd.isna(rsi14[i]):
-                if rsi14[i] > float(sc.get("x", 70)):
-                    should_sell = True
-            sc = sell_cfg.get("below_ma", {})
-            if sc.get("enabled"):
-                mn = _ma(int(sc.get("n", 20)))
-                if not pd.isna(mn[i]) and px < mn[i]:
-                    should_sell = True
-            sc = sell_cfg.get("new_low", {})
-            if sc.get("enabled"):
-                lo = _low(int(sc.get("n", 20)))
-                if not pd.isna(lo[i]) and px <= lo[i]:
-                    should_sell = True
+        sell_dt = str(df["日期"].iloc[i])[:10]
+        cleared = False   # 本日是否已全部平仓（避免同日立即重入）
 
-            if should_sell:
-                sell_amt   = qty * px
-                s_comm     = max(sell_amt * 0.0003, 5.0)
-                proceeds   = sell_amt - s_comm - sell_amt * 0.001
-                buy_amt    = qty * buy_px
-                b_comm     = max(buy_amt * 0.0003, 5.0)
-                total_cost = buy_amt + b_comm
-                trades.append({
-                    "buy_date":   str(buy_dt)[:10],
-                    "buy_price":  round(buy_px, 3),
-                    "sell_date":  str(df["日期"].iloc[i])[:10],
-                    "sell_price": round(px, 3),
-                    "hold_days":  days_h,
-                    "pnl_pct":    round((proceeds - total_cost) / total_cost * 100, 2),
-                })
-                capital = proceeds
-                qty = 0;  buy_px = 0.0;  buy_dt = None;  buy_i = -1
+        # ── 卖出 ──────────────────────────────────────────────────────────────
+        if positions:
+            if sell_mode == "all":
+                # 统一卖出：按加权均价判断止盈止损
+                tq       = sum(p["qty"] for p in positions)
+                avg_cost = sum(p["qty"] * p["cost_px"] for p in positions) / tq
+                days_h   = i - min(p["buy_i"] for p in positions)
+                if _all_sell_conds(avg_cost, days_h, i):
+                    _close_all(px, sell_dt, i); cleared = True
 
-        # ── 买入信号检查（无持仓） ─────────────────────────────────────────────
-        else:
+            else:  # fifo
+                # 先判断全局市场信号 → 全部平仓
+                if _global_conds(i):
+                    _close_all(px, sell_dt, i); cleared = True
+                else:
+                    # 逐笔检查止盈止损（FIFO 顺序）
+                    remaining = []
+                    for p in positions:
+                        dh = i - p["buy_i"]
+                        if _tp_sl_hold(p["cost_px"], i, dh):
+                            rec, proc = _make_rec(p, px, sell_dt, i)
+                            trades.append(rec); capital += proc
+                        else:
+                            remaining.append(p)
+                    positions[:] = remaining
+                    if not positions:
+                        add_count = 0; last_buy_px = 0.0; slot_caps = []; cleared = True
+
+        # ── 初始买入（无持仓） ─────────────────────────────────────────────────
+        if not positions and not cleared:
             signals = []
             for cond in buy_cfg:
-                if not cond.get("enabled"):
-                    continue
-                cid = cond["id"]
-                sig = False
-
-                if cid == "drop_pct":
-                    sig = float(pct_ch[i]) < -float(cond.get("x", 3))
+                if not cond.get("enabled"): continue
+                cid = cond["id"]; sig = False
+                if   cid == "drop_pct":      sig = float(pct_ch[i]) < -float(cond.get("x", 3))
                 elif cid == "vol_ma5":
                     vm5 = vol_ma5[i-1] if i > 0 else 0
                     sig = vm5 > 0 and volume[i] > vm5 * float(cond.get("x", 2))
                 elif cid == "ma_cross_up":
-                    mn = _ma(int(cond.get("n", 20)))
+                    mn  = _ma(int(cond.get("n", 20)))
                     sig = (not pd.isna(mn[i]) and not pd.isna(mn[i-1])
                            and close[i] > mn[i] and close[i-1] <= mn[i-1])
-                elif cid == "interval":
-                    sig = tick % max(int(cond.get("n", 5)), 1) == 0
+                elif cid == "interval":      sig = tick % max(int(cond.get("n", 5)), 1) == 0
                 elif cid == "above_ma":
                     mn  = _ma(int(cond.get("n", 20)))
                     sig = not pd.isna(mn[i]) and close[i] > mn[i]
                 elif cid == "below_ma":
                     mn  = _ma(int(cond.get("n", 20)))
                     sig = not pd.isna(mn[i]) and close[i] < mn[i]
-                elif cid == "macd_golden":
-                    sig = i > 0 and dif[i] > dea[i] and dif[i-1] <= dea[i-1]
-                elif cid == "rsi_below":
-                    sig = not pd.isna(rsi14[i]) and rsi14[i] < float(cond.get("x", 30))
+                elif cid == "macd_golden":   sig = i > 0 and dif[i] > dea[i] and dif[i-1] <= dea[i-1]
+                elif cid == "rsi_below":     sig = not pd.isna(rsi14[i]) and rsi14[i] < float(cond.get("x", 30))
                 elif cid == "vol_yesterday":
                     vy  = vol_prev[i]
                     sig = vy > 0 and volume[i] > vy * float(cond.get("x", 2))
-                elif cid == "consec_down":
-                    sig = consec_dn[i] >= int(cond.get("n", 3))
+                elif cid == "consec_down":   sig = consec_dn[i] >= int(cond.get("n", 3))
                 elif cid == "drawdown":
                     hi  = _high(int(cond.get("n", 60)))
                     sig = (not pd.isna(hi[i]) and hi[i] > 0
                            and (hi[i] - close[i]) / hi[i] * 100 >= float(cond.get("x", 10)))
-                elif cid == "boll_lower":
-                    sig = not pd.isna(boll_lo[i]) and close[i] < boll_lo[i] * 1.02
-
+                elif cid == "boll_lower":    sig = not pd.isna(boll_lo[i]) and close[i] < boll_lo[i] * 1.02
                 signals.append(sig)
 
             tick += 1
             fire = (all(signals) if buy_logic == "AND" else any(signals)) if signals else False
 
-            # T+1：次日开盘价执行
             if fire and i + 1 < n:
-                exec_px = open_p[i + 1]
-                if capital > exec_px * 100:
-                    max_qty     = int((capital * 0.9997 - 5) / exec_px / 100) * 100
-                    actual_cost = max_qty * exec_px
-                    actual_comm = max(actual_cost * 0.0003, 5.0)
-                    if max_qty > 0 and actual_cost + actual_comm <= capital:
-                        capital -= actual_cost + actual_comm
-                        qty    = max_qty;  buy_px = exec_px
-                        buy_dt = df["日期"].iloc[i + 1];  buy_i = i + 1
+                slot_caps = [capital * w for w in w_list]   # 本轮各槽位额度（按当前资金）
+                _do_buy(0, open_p[i + 1], i + 1, False)
+
+        # ── 加仓（有持仓且未达上限） ────────────────────────────────────────────
+        elif positions and not cleared and add_count < max_adds:
+            drop_from_last = (last_buy_px - px) / last_buy_px * 100 if last_buy_px > 0 else 0.0
+            if drop_from_last >= add_drop and i + 1 < n:
+                _do_buy(add_count + 1, open_p[i + 1], i + 1, True)
 
     # ── 末日强制平仓 ──────────────────────────────────────────────────────────
-    if qty > 0:
-        px         = close[-1]
-        sell_amt   = qty * px
-        proceeds   = sell_amt - max(sell_amt * 0.0003, 5.0) - sell_amt * 0.001
-        buy_amt    = qty * buy_px
-        total_cost = buy_amt + max(buy_amt * 0.0003, 5.0)
-        trades.append({
-            "buy_date":   str(buy_dt)[:10],
-            "buy_price":  round(buy_px, 3),
-            "sell_date":  str(df["日期"].iloc[-1])[:10],
-            "sell_price": round(px, 3),
-            "hold_days":  (n - 1) - buy_i,
-            "pnl_pct":    round((proceeds - total_cost) / total_cost * 100, 2),
-        })
-        capital = proceeds
-        if equity_cur:
-            equity_cur[-1]["equity"] = round(capital, 2)
+    if positions:
+        sp = close[-1]; sd = str(df["日期"].iloc[-1])[:10]
+        _close_all(sp, sd, n - 1)
+        if equity_cur: equity_cur[-1]["equity"] = round(capital, 2)
 
+    # ── 汇总指标 ──────────────────────────────────────────────────────────────
     final_eq  = capital
     total_ret = (final_eq - initial_capital) / initial_capital * 100
     n_cal = max((pd.to_datetime(equity_cur[-1]["date"]) -
                  pd.to_datetime(equity_cur[0]["date"])).days, 1) if len(equity_cur) > 1 else 1
-    ann_ret = ((1 + total_ret / 100) ** (365.0 / n_cal) - 1) * 100
-
+    ann_ret  = ((1 + total_ret / 100) ** (365.0 / n_cal) - 1) * 100
     pnls     = [t["pnl_pct"] for t in trades] or [0.0]
     win_rate = sum(1 for p in pnls if p > 0) / len(pnls) * 100
     avg_ret  = sum(pnls) / len(pnls)
     max_loss = min(pnls)
-
-    peak = 0.0;  max_dd = 0.0
+    peak = 0.0; max_dd = 0.0
     for e in equity_cur:
         v = e["equity"]
         if v > peak: peak = v
@@ -1367,6 +1437,8 @@ def _calc_backtest(df: pd.DataFrame,
         "total_return":      round(total_ret, 2),
         "annualized_return": round(ann_ret, 2),
         "final_equity":      round(final_eq, 2),
+        "max_pos_ratio":     round(max_pos_ratio, 1),
+        "total_add_buys":    total_add_buys,
     }
 
 
@@ -1480,6 +1552,47 @@ def show_backtest_page():
                 s_item[pk] = int(raw) if is_int else float(raw)
         sell_cfg[scid] = s_item
 
+    # ── 仓位管理 ──────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("**📦 仓位管理**")
+    _pm1, _pm2, _pm3 = st.columns(3)
+    with _pm1:
+        bt_max_adds = st.number_input(
+            "最大加仓次数（0=不加仓）", min_value=0, max_value=5,
+            value=0, step=1, key="bt_max_adds")
+    with _pm2:
+        bt_add_drop = st.number_input(
+            "加仓触发跌幅（%）", min_value=0.5, max_value=20.0,
+            value=3.0, step=0.5, key="bt_add_drop",
+            disabled=(bt_max_adds == 0))
+    with _pm3:
+        _alloc_opts = ["平摊", "保守金字塔（首仓重）", "激进金字塔（末仓重）"]
+        bt_alloc = st.selectbox(
+            "仓位分配方式", _alloc_opts, key="bt_alloc",
+            disabled=(bt_max_adds == 0))
+    bt_sell_mode = st.radio(
+        "卖出方式", ["统一卖出（按均价触发）", "分批卖出·FIFO（逐笔独立计算）"],
+        horizontal=True, key="bt_sell_mode")
+    if bt_max_adds > 0:
+        _alloc_hint = {
+            "平摊": f"每次买入 ≈ 当轮资金 ÷ {1+bt_max_adds}",
+            "保守金字塔（首仓重）": "首仓最重，逐次递减（4次示例：40/30/20/10%）",
+            "激进金字塔（末仓重）": "首仓最轻，越跌越买（4次示例：10/20/30/40%）",
+        }
+        st.caption(_alloc_hint.get(bt_alloc, ""))
+
+    _alloc_map = {"平摊": "equal",
+                  "保守金字塔（首仓重）": "pyramid_safe",
+                  "激进金字塔（末仓重）": "pyramid_aggressive"}
+    _sell_map  = {"统一卖出（按均价触发）": "all",
+                  "分批卖出·FIFO（逐笔独立计算）": "fifo"}
+    pos_cfg = {
+        "max_adds":    int(bt_max_adds),
+        "add_drop_pct": float(bt_add_drop),
+        "alloc_mode":  _alloc_map[bt_alloc],
+        "sell_mode":   _sell_map[bt_sell_mode],
+    }
+
     # ── 运行回测 ──────────────────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("▶️ 开始回测", type="primary", key="bt_run"):
@@ -1510,7 +1623,8 @@ def show_backtest_page():
                 if data_src:
                     st.info(f"数据来源：{data_src}", icon="ℹ️")
                 trades, equity_cur, metrics = _calc_backtest(
-                    df_hist, buy_cfg, buy_logic, sell_cfg, float(bt_capital),
+                    df_hist, buy_cfg, buy_logic, sell_cfg,
+                    float(bt_capital), pos_cfg,
                 )
                 st.session_state["bt_result"] = {
                     "trades":     trades,
@@ -1520,6 +1634,7 @@ def show_backtest_page():
                     "capital":    bt_capital,
                     "stock":      f"{bt_name}（{bt_code}）",
                     "data_src":   data_src,
+                    "pos_cfg":    pos_cfg,
                 }
                 st.rerun()
 
@@ -1555,6 +1670,15 @@ def show_backtest_page():
     r6.metric("最大单笔亏损", f"{m['max_loss']:.2f}%")
     r7.metric("最大回撤",     f"{m['max_drawdown']:.2f}%")
     r8.metric("初始资金",     f"{cap:,.0f} 元")
+
+    r9, r10, r11, r12 = st.columns(4)
+    r9.metric("最大仓位占比",  f"{m.get('max_pos_ratio', 0):.1f}%")
+    r10.metric("加仓总次数",   f"{m.get('total_add_buys', 0)} 次")
+    # 平均持仓成本（最近一次持仓结算均价）
+    if trades:
+        _total_amt = sum(t["pnl_amt"] for t in trades)
+        r11.metric("总盈亏金额", f"{_total_amt:+,.2f} 元")
+    r12.metric("触发交易笔数", f"{len(trades)} 笔")
 
     # 图表
     tab_eq, tab_kl = st.tabs(["📈 资金曲线", "📊 交易标注"])
@@ -1620,14 +1744,19 @@ def show_backtest_page():
     # 交易明细
     if trades:
         st.markdown("#### 📋 交易明细")
+        def _add_label(n):
+            return "初始建仓" if n == 0 else f"第 {n} 次加仓"
         st.dataframe(
             [{
+                "类型":     _add_label(t.get("add_num", 0)),
                 "买入日期": t["buy_date"],
                 "买入价":   f"{t['buy_price']:.3f}",
+                "手数":     f"{t.get('qty', 0):,}",
                 "卖出日期": t["sell_date"],
                 "卖出价":   f"{t['sell_price']:.3f}",
                 "持有天数": t["hold_days"],
                 "盈亏%":    f"{t['pnl_pct']:+.2f}%",
+                "盈亏额(元)": f"{t.get('pnl_amt', 0):+,.2f}",
             } for t in trades],
             use_container_width=True,
             hide_index=True,
