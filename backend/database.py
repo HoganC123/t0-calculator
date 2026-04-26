@@ -101,6 +101,22 @@ async def auth_sign_in(email: str, password: str) -> dict:
     return resp.json()
 
 
+async def auth_refresh(refresh_token: str) -> dict:
+    """
+    POST /auth/v1/token?grant_type=refresh_token
+    返回新的 {access_token, refresh_token, expires_in, ...}
+    """
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{_AUTH}/token?grant_type=refresh_token",
+            json={"refresh_token": refresh_token},
+            headers={"apikey": _KEY, "Content-Type": "application/json"},
+            timeout=10,
+        )
+    _raise(resp)
+    return resp.json()
+
+
 async def auth_sign_out(token: str) -> None:
     """POST /auth/v1/logout — 使该 token 失效"""
     async with httpx.AsyncClient() as client:

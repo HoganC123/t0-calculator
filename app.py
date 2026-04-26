@@ -124,8 +124,41 @@ def _unavailable(e: Exception) -> bool:
                           _req.exceptions.Timeout))
 
 
+def _refresh_token_if_needed() -> None:
+    """
+    检查 access_token 是否即将过期（剩余 < 60 秒），若是则用 refresh_token 换新。
+    刷新失败时清除登录状态，让页面回到登录界面。
+    """
+    import time
+    expires_at = st.session_state.get("token_expires_at", 0)
+    if not st.session_state.get("token") or time.time() < expires_at - 60:
+        return  # 未登录或尚未过期，无需刷新
+
+    refresh_token = st.session_state.get("refresh_token", "")
+    if not refresh_token:
+        _handle_expired()
+        return
+
+    try:
+        resp = _req.post(
+            f"{_API}/auth/refresh",
+            json={"refresh_token": refresh_token},
+            timeout=10,
+        )
+        if not resp.ok:
+            _handle_expired()
+            return
+        data = resp.json()
+        st.session_state["token"]            = data["access_token"]
+        st.session_state["refresh_token"]    = data.get("refresh_token", refresh_token)
+        st.session_state["token_expires_at"] = time.time() + data.get("expires_in", 3600)
+    except Exception:
+        _handle_expired()
+
+
 def _auth_hdr() -> dict:
-    """从 session_state 取 token，拼成 Authorization header"""
+    """取 token（请求前自动刷新），拼成 Authorization header"""
+    _refresh_token_if_needed()
     token = st.session_state.get("token", "")
     return {"Authorization": f"Bearer {token}"} if token else {}
 
@@ -133,6 +166,8 @@ def _auth_hdr() -> dict:
 def _handle_expired() -> None:
     """token 过期时清除登录状态并刷新页面"""
     st.session_state.pop("token", None)
+    st.session_state.pop("refresh_token", None)
+    st.session_state.pop("token_expires_at", None)
     st.session_state.pop("user_email", None)
     st.session_state.pop("today_count", None)
     st.error("登录已过期，请重新登录")
@@ -1486,8 +1521,11 @@ def api_login(email: str, password: str,
                 return False, "邮箱或密码错误"
             resp.raise_for_status()
             data = resp.json()
-            st.session_state["token"]      = data["access_token"]
-            st.session_state["user_email"] = data.get("user", {}).get("email", email)
+            import time as _time
+            st.session_state["token"]            = data["access_token"]
+            st.session_state["refresh_token"]    = data.get("refresh_token", "")
+            st.session_state["token_expires_at"] = _time.time() + data.get("expires_in", 3600)
+            st.session_state["user_email"]       = data.get("user", {}).get("email", email)
             return True, ""
         except Exception as e:
             err_detail = f"{type(e).__name__}: {e}"

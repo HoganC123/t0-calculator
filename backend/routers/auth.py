@@ -6,7 +6,7 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from database import auth_get_user, auth_sign_in, auth_sign_out, auth_sign_up
+from database import auth_get_user, auth_refresh, auth_sign_in, auth_sign_out, auth_sign_up
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -52,6 +52,23 @@ async def login(body: AuthIn) -> Any:
         # 400 通常是密码错误或用户不存在
         detail = "邮箱或密码错误" if code == 400 else str(e)
         raise HTTPException(status_code=code, detail=detail)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class RefreshIn(BaseModel):
+    refresh_token: str = ""
+
+
+@router.post("/refresh")
+async def refresh(body: RefreshIn) -> Any:
+    """用 refresh_token 换取新的 access_token。"""
+    if not body.refresh_token:
+        raise HTTPException(status_code=422, detail="refresh_token 不能为空")
+    try:
+        return await auth_refresh(body.refresh_token)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
