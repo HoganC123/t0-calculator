@@ -69,23 +69,47 @@ _API     = st.secrets.get("BACKEND_URL", "https://t0-calculator-production.up.ra
 _TIMEOUT = 8   # 秒
 
 
-def _ping_backend() -> None:
-    """后台异步 ping /health，让 Railway 从休眠中唤醒，不阻塞页面渲染。"""
-    import threading
-    def _do():
-        try:
-            import requests as _r
-            _r.get(f"{_API}/health", timeout=15)
-        except Exception:
-            pass  # 网络异常静默忽略，不影响前端
-    threading.Thread(target=_do, daemon=True).start()
+def _warmup_backend() -> None:
+    """
+    页面加载时同步检测后端是否就绪：
+    1. 先做一次快速探测（3 秒超时）
+    2. 若失败，显示 spinner，每 5 秒重试，最多 6 次（共等 ≤30 秒）
+    3. 成功后调用 st.rerun()，自动刷新页面数据；6 次全失败则静默放行
+    同一 session 只执行一次，后续 rerun 直接跳过。
+    """
+    import time
+    import requests as _r
+
+    if st.session_state.get("_backend_ready"):
+        return  # 本次 session 已确认就绪，跳过
+
+    # ── 快速探测（不显示 UI，后端已热时用户无感知）─────────────────────────────
+    try:
+        resp = _r.get(f"{_API}/health", timeout=3)
+        if resp.status_code == 200:
+            st.session_state["_backend_ready"] = True
+            return
+    except Exception:
+        pass
+
+    # ── 后端未就绪：显示等待提示，每 5 秒重试一次，最多 6 次 ─────────────────
+    with st.spinner("服务启动中，预计等待 10–30 秒，请稍候…"):
+        for attempt in range(6):
+            time.sleep(5)
+            try:
+                resp = _r.get(f"{_API}/health", timeout=5)
+                if resp.status_code == 200:
+                    st.session_state["_backend_ready"] = True
+                    st.rerun()   # 成功后自动刷新，用户看到正常页面
+            except Exception:
+                pass
+
+    # 6 次全失败：静默放行，不阻塞页面（后续 API 调用会给出具体错误）
+    st.session_state["_backend_ready"] = True
 
 
-# 保活：每次新会话（浏览器首次打开）异步 ping 后端，防止 Railway 冷启动超时
-# 用 session_state 标记，只在会话建立时触发一次，不随每次操作重复发送
-if "_backend_pinged" not in st.session_state:
-    st.session_state["_backend_pinged"] = True
-    _ping_backend()
+# 每次新 session 打开页面时触发一次预热检测
+_warmup_backend()
 
 _ERR_CONN = "服务启动中，请等待10秒后重试"   # 统一连接失败提示（Railway 冷启动）
 
@@ -2010,7 +2034,7 @@ with tab4:
 
     if err:
         st.error(f"读取数据失败：{err}")
-        st.info("请确认后端服务已启动：uvicorn main:app --reload --port 8000")
+        st.info("后端服务连接中，请稍候...")
     elif not records:
         st.info("暂无历史记录。完成一次计算后点击「📌 保存本次记录」即可保存。")
     else:
