@@ -1130,20 +1130,19 @@ def _calc_backtest(df: pd.DataFrame,
                    pos_cfg: dict | None = None) -> tuple[list, list, dict]:
     """
     回测引擎 v2：T+1 成交（信号日收盘触发，次日开盘执行），整手（100股）。
-    支持多次加仓、仓位分配策略（平摊/保守金字塔/激进金字塔）、统一/FIFO 卖出。
+    支持多次加仓、仓位分配策略（平摊/保守金字塔/激进金字塔）。
+    卖出固定采用统一卖出：以加权平均持仓成本为基准计算止盈止损，触发后一次清仓。
 
     pos_cfg 键：
         max_adds(int)       最大加仓次数，0=不加仓（原逻辑）
-        add_drop_pct(float) 加仓触发：距上次买入价再跌 X%
+        add_drop_pct(float) 加仓触发：当前价格距平均持仓成本再跌 X%
         alloc_mode(str)     equal | pyramid_safe | pyramid_aggressive
-        sell_mode(str)      all（均价统一卖出）| fifo（逐笔独立计算）
     """
     # ── 仓位管理参数 ──────────────────────────────────────────────────────────
     _pc       = pos_cfg or {}
     max_adds  = max(0, int(_pc.get("max_adds", 0)))
     add_drop  = float(_pc.get("add_drop_pct", 3.0))
     alloc_m   = str(_pc.get("alloc_mode", "equal"))
-    sell_mode = str(_pc.get("sell_mode", "all"))
     n_slots   = 1 + max_adds
 
     def _weights(mode, n):
@@ -1219,7 +1218,6 @@ def _calc_backtest(df: pd.DataFrame,
     # 持仓列表：每笔 {qty, cost_px, buy_date, buy_i, add_num}
     positions: list[dict] = []
     add_count    = 0      # 本轮已加仓次数
-    last_buy_px  = 0.0    # 上次买入执行价（用于加仓触发判断）
     slot_caps: list[float] = []   # 本轮各槽位可用资金
 
     trades:     list[dict] = []
@@ -1229,7 +1227,8 @@ def _calc_backtest(df: pd.DataFrame,
     tick           = 0
 
     # ── 内部工具函数 ──────────────────────────────────────────────────────────
-    def _make_rec(p: dict, sell_px: float, sell_date_s: str, sell_i: int):
+    def _make_rec(p: dict, sell_px: float, sell_date_s: str, sell_i: int,
+                  avg_cost: float = 0.0):
         """生成一笔交易记录，返回 (record_dict, proceeds)"""
         sell_amt = p["qty"] * sell_px
         s_comm   = max(sell_amt * 0.0003, 5.0)
@@ -1240,6 +1239,7 @@ def _calc_backtest(df: pd.DataFrame,
         return {
             "buy_date":   str(p["buy_date"])[:10],
             "buy_price":  round(p["cost_px"], 3),
+            "avg_cost":   round(avg_cost, 3),
             "sell_date":  sell_date_s,
             "sell_price": round(sell_px, 3),
             "qty":        p["qty"],
@@ -1250,7 +1250,7 @@ def _calc_backtest(df: pd.DataFrame,
         }, proceeds
 
     def _tp_sl_hold(cost_px: float, cur_i: int, days_h: int) -> bool:
-        """止盈 / 止损 / 最长持有——基于单笔成本（FIFO 逐笔模式用）"""
+        """止盈 / 止损 / 最长持有——基于传入成本（统一卖出时传均价）"""
         r = (close[cur_i] / cost_px - 1) * 100
         sc = sell_cfg.get("tp", {})
         if sc.get("enabled") and r >= float(sc.get("pct", 10)): return True
@@ -1284,16 +1284,19 @@ def _calc_backtest(df: pd.DataFrame,
         return _tp_sl_hold(avg_cost, cur_i, days_h) or _global_conds(cur_i)
 
     def _close_all(sell_px: float, sell_date_s: str, sell_i: int) -> None:
-        nonlocal capital, add_count, last_buy_px, slot_caps
+        nonlocal capital, add_count, slot_caps
+        # 计算平均持仓成本（用于记录和止盈止损基准）
+        tq = sum(p["qty"] for p in positions)
+        ac = sum(p["qty"] * p["cost_px"] for p in positions) / tq if tq > 0 else 0.0
         for p in positions:
-            rec, proc = _make_rec(p, sell_px, sell_date_s, sell_i)
+            rec, proc = _make_rec(p, sell_px, sell_date_s, sell_i, ac)
             trades.append(rec)
             capital += proc
         positions.clear()
-        add_count = 0; last_buy_px = 0.0; slot_caps = []
+        add_count = 0; slot_caps = []
 
     def _do_buy(slot_idx: int, exec_px: float, exec_i: int, is_add: bool) -> bool:
-        nonlocal capital, add_count, total_add_buys, last_buy_px
+        nonlocal capital, add_count, total_add_buys
         alloc    = min(slot_caps[slot_idx] if slot_idx < len(slot_caps) else 0.0, capital)
         if alloc < exec_px * 100: return False
         max_qty  = int((alloc * 0.9997 - 5.0) / exec_px / 100) * 100
@@ -1310,7 +1313,6 @@ def _calc_backtest(df: pd.DataFrame,
         positions.append({"qty": max_qty, "cost_px": exec_px,
                            "buy_date": df["日期"].iloc[exec_i],
                            "buy_i": exec_i, "add_num": an})
-        last_buy_px = exec_px
         return True
 
     # ── 主循环 ────────────────────────────────────────────────────────────────
@@ -1329,33 +1331,13 @@ def _calc_backtest(df: pd.DataFrame,
         sell_dt = str(df["日期"].iloc[i])[:10]
         cleared = False   # 本日是否已全部平仓（避免同日立即重入）
 
-        # ── 卖出 ──────────────────────────────────────────────────────────────
+        # ── 卖出（统一卖出：以加权均价为基准，触发后一次清仓）────────────────────
         if positions:
-            if sell_mode == "all":
-                # 统一卖出：按加权均价判断止盈止损
-                tq       = sum(p["qty"] for p in positions)
-                avg_cost = sum(p["qty"] * p["cost_px"] for p in positions) / tq
-                days_h   = i - min(p["buy_i"] for p in positions)
-                if _all_sell_conds(avg_cost, days_h, i):
-                    _close_all(px, sell_dt, i); cleared = True
-
-            else:  # fifo
-                # 先判断全局市场信号 → 全部平仓
-                if _global_conds(i):
-                    _close_all(px, sell_dt, i); cleared = True
-                else:
-                    # 逐笔检查止盈止损（FIFO 顺序）
-                    remaining = []
-                    for p in positions:
-                        dh = i - p["buy_i"]
-                        if _tp_sl_hold(p["cost_px"], i, dh):
-                            rec, proc = _make_rec(p, px, sell_dt, i)
-                            trades.append(rec); capital += proc
-                        else:
-                            remaining.append(p)
-                    positions[:] = remaining
-                    if not positions:
-                        add_count = 0; last_buy_px = 0.0; slot_caps = []; cleared = True
+            tq       = sum(p["qty"] for p in positions)
+            avg_cost = sum(p["qty"] * p["cost_px"] for p in positions) / tq
+            days_h   = i - min(p["buy_i"] for p in positions)
+            if _all_sell_conds(avg_cost, days_h, i):
+                _close_all(px, sell_dt, i); cleared = True
 
         # ── 初始买入（无持仓） ─────────────────────────────────────────────────
         if not positions and not cleared:
@@ -1398,10 +1380,12 @@ def _calc_backtest(df: pd.DataFrame,
                 slot_caps = [capital * w for w in w_list]   # 本轮各槽位额度（按当前资金）
                 _do_buy(0, open_p[i + 1], i + 1, False)
 
-        # ── 加仓（有持仓且未达上限） ────────────────────────────────────────────
+        # ── 加仓（有持仓且未达上限）：以当前均价为基准 ──────────────────────────
         elif positions and not cleared and add_count < max_adds:
-            drop_from_last = (last_buy_px - px) / last_buy_px * 100 if last_buy_px > 0 else 0.0
-            if drop_from_last >= add_drop and i + 1 < n:
+            tq_now   = sum(p["qty"] for p in positions)
+            ac_now   = sum(p["qty"] * p["cost_px"] for p in positions) / tq_now
+            drop_from_avg = (ac_now - px) / ac_now * 100 if ac_now > 0 else 0.0
+            if drop_from_avg >= add_drop and i + 1 < n:
                 _do_buy(add_count + 1, open_p[i + 1], i + 1, True)
 
     # ── 末日强制平仓 ──────────────────────────────────────────────────────────
@@ -1570,27 +1554,22 @@ def show_backtest_page():
         bt_alloc = st.selectbox(
             "仓位分配方式", _alloc_opts, key="bt_alloc",
             disabled=(bt_max_adds == 0))
-    bt_sell_mode = st.radio(
-        "卖出方式", ["统一卖出（按均价触发）", "分批卖出·FIFO（逐笔独立计算）"],
-        horizontal=True, key="bt_sell_mode")
     if bt_max_adds > 0:
         _alloc_hint = {
-            "平摊": f"每次买入 ≈ 当轮资金 ÷ {1+bt_max_adds}",
+            "平摊":             f"初始资金均分为 {1+bt_max_adds} 份，每次买入一份",
             "保守金字塔（首仓重）": "首仓最重，逐次递减（4次示例：40/30/20/10%）",
             "激进金字塔（末仓重）": "首仓最轻，越跌越买（4次示例：10/20/30/40%）",
         }
         st.caption(_alloc_hint.get(bt_alloc, ""))
+    st.caption("卖出方式：统一卖出 — 以加权平均持仓成本为基准计算止盈止损，触发后一次清仓")
 
     _alloc_map = {"平摊": "equal",
                   "保守金字塔（首仓重）": "pyramid_safe",
                   "激进金字塔（末仓重）": "pyramid_aggressive"}
-    _sell_map  = {"统一卖出（按均价触发）": "all",
-                  "分批卖出·FIFO（逐笔独立计算）": "fifo"}
     pos_cfg = {
-        "max_adds":    int(bt_max_adds),
+        "max_adds":     int(bt_max_adds),
         "add_drop_pct": float(bt_add_drop),
-        "alloc_mode":  _alloc_map[bt_alloc],
-        "sell_mode":   _sell_map[bt_sell_mode],
+        "alloc_mode":   _alloc_map[bt_alloc],
     }
 
     # ── 运行回测 ──────────────────────────────────────────────────────────────
@@ -1748,14 +1727,15 @@ def show_backtest_page():
             return "初始建仓" if n == 0 else f"第 {n} 次加仓"
         st.dataframe(
             [{
-                "类型":     _add_label(t.get("add_num", 0)),
-                "买入日期": t["buy_date"],
-                "买入价":   f"{t['buy_price']:.3f}",
-                "手数":     f"{t.get('qty', 0):,}",
-                "卖出日期": t["sell_date"],
-                "卖出价":   f"{t['sell_price']:.3f}",
-                "持有天数": t["hold_days"],
-                "盈亏%":    f"{t['pnl_pct']:+.2f}%",
+                "类型":       _add_label(t.get("add_num", 0)),
+                "买入日期":   t["buy_date"],
+                "本次买入价": f"{t['buy_price']:.3f}",
+                "均价成本":   f"{t.get('avg_cost', t['buy_price']):.3f}",
+                "手数":       f"{t.get('qty', 0):,}",
+                "卖出日期":   t["sell_date"],
+                "卖出价":     f"{t['sell_price']:.3f}",
+                "持有天数":   t["hold_days"],
+                "盈亏%":      f"{t['pnl_pct']:+.2f}%",
                 "盈亏额(元)": f"{t.get('pnl_amt', 0):+,.2f}",
             } for t in trades],
             use_container_width=True,
