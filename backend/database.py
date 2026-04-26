@@ -20,6 +20,11 @@ _TABLE   = f"{_URL}/rest/v1/trade_records"
 _JOURNAL = f"{_URL}/rest/v1/trade_journal"
 _AUTH    = f"{_URL}/auth/v1"
 
+# ── 启动时诊断日志 ────────────────────────────────────────────────────────────
+print(f"[DEBUG] SUPABASE_URL  前20字符: {_URL[:20]!r}")
+print(f"[DEBUG] SUPABASE_KEY  前10字符: {_KEY[:10]!r}  (长度={len(_KEY)})")
+print(f"[DEBUG] SUPABASE_KEY  格式: {'sb_secret_/sb_publishable_ (新格式，可能不兼容)' if _KEY.startswith('sb_') else 'eyJ... (旧格式JWT)' if _KEY.startswith('eyJ') else '未知格式或未设置'}")
+
 
 # ── 公共 Header 构造 ───────────────────────────────────────────────────────────
 
@@ -81,13 +86,17 @@ async def auth_sign_in(email: str, password: str) -> dict:
     POST /auth/v1/token?grant_type=password
     返回 {access_token, token_type, expires_in, refresh_token, user}
     """
+    url = f"{_AUTH}/token?grant_type=password"
+    print(f"[DEBUG] auth_sign_in: POST {url}")
+    print(f"[DEBUG] auth_sign_in: apikey前10字符={_KEY[:10]!r}")
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            f"{_AUTH}/token?grant_type=password",
+            url,
             json={"email": email, "password": password},
             headers={"apikey": _KEY, "Content-Type": "application/json"},
             timeout=10,
         )
+    print(f"[DEBUG] auth_sign_in: HTTP {resp.status_code}  body={resp.text[:300]}")
     _raise(resp)
     return resp.json()
 
