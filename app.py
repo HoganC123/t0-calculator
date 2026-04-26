@@ -70,12 +70,12 @@ _TIMEOUT = 8   # 秒
 
 
 def _ping_backend() -> None:
-    """后台异步 ping 后端根路径，让 Railway 从休眠中唤醒，不阻塞页面渲染。"""
+    """后台异步 ping /health，让 Railway 从休眠中唤醒，不阻塞页面渲染。"""
     import threading
     def _do():
         try:
             import requests as _r
-            _r.get(f"{_API}/", timeout=15)
+            _r.get(f"{_API}/health", timeout=15)
         except Exception:
             pass  # 网络异常静默忽略，不影响前端
     threading.Thread(target=_do, daemon=True).start()
@@ -1437,21 +1437,34 @@ def show_backtest_page():
 # 用户认证
 # ══════════════════════════════════════════════════════════════════════════════
 
-def api_login(email: str, password: str) -> tuple[bool, str]:
-    """调用 /auth/login，成功后把 token 和邮箱写入 session_state"""
-    try:
-        resp = _req.post(f"{_API}/auth/login",
-                         json={"email": email, "password": password},
-                         timeout=_TIMEOUT)
-        if resp.status_code == 400:
-            return False, "邮箱或密码错误"
-        resp.raise_for_status()
-        data = resp.json()
-        st.session_state["token"]      = data["access_token"]
-        st.session_state["user_email"] = data.get("user", {}).get("email", email)
-        return True, ""
-    except Exception as e:
-        return False, _ERR_CONN if _unavailable(e) else str(e)
+def api_login(email: str, password: str,
+              max_tries: int = 4, retry_delay: float = 2.0) -> tuple[bool, str]:
+    """
+    调用 /auth/login，成功后把 token 和邮箱写入 session_state。
+    遇到连接类错误（Railway 冷启动）时自动重试，最多 max_tries 次。
+    密码错误等业务错误不重试。
+    """
+    import time
+    last_err = _ERR_CONN
+    for attempt in range(max_tries):
+        try:
+            resp = _req.post(f"{_API}/auth/login",
+                             json={"email": email, "password": password},
+                             timeout=_TIMEOUT)
+            if resp.status_code == 400:
+                return False, "邮箱或密码错误"
+            resp.raise_for_status()
+            data = resp.json()
+            st.session_state["token"]      = data["access_token"]
+            st.session_state["user_email"] = data.get("user", {}).get("email", email)
+            return True, ""
+        except Exception as e:
+            if not _unavailable(e):
+                return False, str(e)       # 业务错误，不重试
+            last_err = _ERR_CONN
+            if attempt < max_tries - 1:    # 还有机会，等待后重试
+                time.sleep(retry_delay)
+    return False, last_err
 
 
 def api_register(email: str, password: str) -> tuple[bool, str]:
@@ -1501,7 +1514,7 @@ def _show_auth_page() -> None:
                 if not email_in or not pwd_in:
                     st.warning("请输入邮箱和密码")
                 else:
-                    with st.spinner("登录中…"):
+                    with st.spinner("登录中，若服务冷启动将自动重试（最多等待约30秒）…"):
                         ok, err = api_login(email_in, pwd_in)
                     if ok:
                         st.rerun()

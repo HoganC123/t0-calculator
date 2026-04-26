@@ -28,3 +28,9 @@ app.include_router(journal.router)
 @app.get("/")
 def root():
     return {"status": "ok"}
+
+
+@app.get("/health")
+def health():
+    """专用健康检查端点，供前端预热 Railway 冷启动使用。"""
+    return {"status": "ok"}
