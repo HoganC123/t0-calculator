@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 from database import auth_get_user, auth_sign_in, auth_sign_out, auth_sign_up
 
