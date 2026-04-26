@@ -10,10 +10,28 @@ import pandas as pd
 
 st.set_page_config(page_title="筹码本", layout="wide")
 
-# ── PWA meta 标签 ─────────────────────────────────────────────────────────────
-st.markdown("""
-<link rel="manifest" href="/app/static/manifest.json">
-<link rel="apple-touch-icon" href="/app/static/icon-192.png">
+# ── PWA meta 标签（base64 内嵌图标，兼容 Streamlit Cloud）─────────────────────
+_ICON_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAADd0lEQVR4nO3dT2oTUQDA4al0"
+    "HVzrpkvRC4hLr9AjuBI8TsGVR/AKLsULKF12Y9fiBSot9o8hbUNtkpn5fR8EEpJFCu+XmXnv"
+    "Jd1bLBZnA0Q92fUbgF0SAGkCIE0ApAmANAGQJgDSBECaAEgTAGkCIE0ApAmANAGQJgDSBECa"
+    "AEgTAGkCIE0ApAmANAGQJgDSBECaAEgTAGkCIE0ApAmANAGQJgDSBECaAEgTAGkCIE0ApAmA"
+    "NAGQJgDSBECaAEgTAGkCIE0ApO35P8G7dTkzcvL20zB1Bw+c5dnl3+4IQJoASBMAaQIIOn71"
+    "+uKGAIhzBCBNAKQJgLT9Xb+BgnUWiFa95n8WiNa5yD1e8ZoX378NJY4ApAmANAGQJgDSBEDa"
+    "KGeB5rRFuOzrj1//PH7z8ukwNqMMgOk4PTq8fjCBAb9MAKw/wFd49uHz1f0x/uzJfQSwtChU"
+    "WwgKt3j/fLh0OhzeOsDnSADBQb7s98efV/drHwACiJyu3BzkXBPATM/HfeFlPQIY89ThUet8"
+    "PBfAfbMGtz2/yV2Stz3/2OfGy3Pkq6YOrYNsniPAlkxhUahIAFtaIDLgx0kAG7o4nfoCUYUA"
+    "HmHAuzidLgGsuYh0c4XUgJ8PAayxanq+iFRbIa3IB7Bqi8AcVk3vCnZT+55O7pieHusW9/36"
+    "xeocBjsPt1+bmbFFgFkGYGaGTAD3zbvDbAJYtWfGYJ+ek5Fd/I46gJuD3haCx2dKd+QBGPSk"
+    "A9jFp98mvxM8xfnxCj+MRZoASBMAablrgLFx7r9bjgCkCYA0p0B/WRxqcgQgTQCkCYC0vcVi"
+    "cTaMjO0BbIsjAGkCIE0ApAmANAGQJgDSBECaAEgTAGkCIE0ApAmANAGQJgDSBECaAEgTAGkC"
+    "IE0ApAmANAGQJgDSBECaAEgTAGkCIE0ApAmANAGQJgDSBECaAEgTAGkCIE0ApAmANAGQJgDS"
+    "BECaAEgTAGkCIE0ApAmANAGQJgDSBECaAEgTAGkCIE0ApAmANAGQJgDSBECaAEgTAGkCIE0A"
+    "pAmANAGQJgDSBECaAEgTAGkCIE0ApAmANAGQJgDSBECaAEgTAGkCIE0ApAmANAGQJgDSBECa"
+    "AEgTAGkCIE0ApAmANAEwlP0B5A+Y8bkkQTMAAAAASUVORK5CYII="
+)
+st.markdown(f"""
+<link rel="apple-touch-icon" href="data:image/png;base64,{_ICON_B64}">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="筹码本">
 <meta name="theme-color" content="#e63946">
