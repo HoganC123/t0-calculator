@@ -1718,11 +1718,6 @@ def _show_auth_page() -> None:
     st.markdown("<br><br>", unsafe_allow_html=True)
     _, card, _ = st.columns([1, 1.4, 1])
     with card:
-        st.markdown(
-            '<p class="auth-logo">筹码本</p>'
-            '<p class="auth-sub">A 股散户决策工具</p>',
-            unsafe_allow_html=True,
-        )
         tab_in, tab_up = st.tabs(["登录", "注册"])
 
         # ── 登录 Tab ──
