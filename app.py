@@ -1469,12 +1469,15 @@ def api_login(email: str, password: str,
     密码错误等业务错误不重试。
     """
     import time
+    print(f"[DEBUG] api_login: 使用 API 地址 = {_API}")
     last_err = _ERR_CONN
     for attempt in range(max_tries):
         try:
+            print(f"[DEBUG] api_login: 第 {attempt+1}/{max_tries} 次尝试 POST {_API}/auth/login")
             resp = _req.post(f"{_API}/auth/login",
                              json={"email": email, "password": password},
                              timeout=_TIMEOUT)
+            print(f"[DEBUG] api_login: HTTP {resp.status_code}，响应体 = {resp.text[:200]}")
             if resp.status_code == 400:
                 return False, "邮箱或密码错误"
             resp.raise_for_status()
@@ -1483,10 +1486,12 @@ def api_login(email: str, password: str,
             st.session_state["user_email"] = data.get("user", {}).get("email", email)
             return True, ""
         except Exception as e:
+            err_detail = f"{type(e).__name__}: {e}"
+            print(f"[DEBUG] api_login: 第 {attempt+1} 次异常 → {err_detail}")
             if not _unavailable(e):
-                return False, str(e)       # 业务错误，不重试
-            last_err = _ERR_CONN
-            if attempt < max_tries - 1:    # 还有机会，等待后重试
+                return False, err_detail   # 业务错误，不重试，直接透传真实错误
+            last_err = err_detail          # 连接错误也记录真实信息
+            if attempt < max_tries - 1:
                 time.sleep(retry_delay)
     return False, last_err
 
