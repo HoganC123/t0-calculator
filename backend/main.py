@@ -30,7 +30,7 @@ def root():
     return {"status": "ok"}
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     """专用健康检查端点，供前端预热 Railway 冷启动使用。"""
     return {"status": "ok"}
