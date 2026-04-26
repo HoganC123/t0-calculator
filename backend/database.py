@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import os
 
+for _k in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']:
+    os.environ.pop(_k, None)
+
 import httpx
 from dotenv import load_dotenv
 
@@ -70,7 +73,7 @@ async def auth_sign_up(email: str, password: str) -> dict:
     POST /auth/v1/signup
     返回 Supabase 用户对象（含 id、email、created_at）
     """
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{_AUTH}/signup",
             json={"email": email, "password": password},
@@ -89,7 +92,7 @@ async def auth_sign_in(email: str, password: str) -> dict:
     url = f"{_AUTH}/token?grant_type=password"
     print(f"[DEBUG] auth_sign_in: POST {url}")
     print(f"[DEBUG] auth_sign_in: apikey前10字符={_KEY[:10]!r}")
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.post(
             url,
             json={"email": email, "password": password},
@@ -107,7 +110,7 @@ async def auth_refresh(refresh_token: str) -> dict:
     POST /auth/v1/token?grant_type=refresh_token
     返回新的 {access_token, refresh_token, expires_in, ...}
     """
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{_AUTH}/token?grant_type=refresh_token",
             json={"refresh_token": refresh_token},
@@ -120,7 +123,7 @@ async def auth_refresh(refresh_token: str) -> dict:
 
 async def auth_sign_out(token: str) -> None:
     """POST /auth/v1/logout — 使该 token 失效"""
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{_AUTH}/logout",
             headers=_auth_headers(token),
@@ -136,7 +139,7 @@ async def auth_get_user(token: str) -> dict:
     GET /auth/v1/user — 验证 token 并返回用户信息
     token 无效时 Supabase 返回 401，由调用方处理
     """
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{_AUTH}/user",
             headers=_auth_headers(token),
@@ -156,7 +159,7 @@ async def save_trade(data: dict, user_id: str) -> dict:
     自动注入 user_id，返回插入后的完整记录
     """
     payload = {**data, "user_id": user_id}
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.post(
             _TABLE,
             json=payload,
@@ -173,7 +176,7 @@ async def list_trades(user_id: str) -> list[dict]:
     GET /rest/v1/trade_records?user_id=eq.<user_id>&order=created_at.desc
     只返回当前用户自己的记录
     """
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.get(
             _TABLE,
             params={
@@ -193,7 +196,7 @@ async def delete_trade(record_id: str, user_id: str) -> None:
     DELETE /rest/v1/trade_records?id=eq.<id>&user_id=eq.<user_id>
     双重过滤：防止越权删除他人记录
     """
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.delete(
             _TABLE,
             params={"id": f"eq.{record_id}", "user_id": f"eq.{user_id}"},
@@ -208,7 +211,7 @@ async def clear_trades(user_id: str) -> int:
     DELETE /rest/v1/trade_records?user_id=eq.<user_id>
     只清空当前用户的记录，返回删除条数
     """
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.delete(
             _TABLE,
             params={"user_id": f"eq.{user_id}"},
@@ -228,7 +231,7 @@ async def clear_trades(user_id: str) -> int:
 
 async def save_journal(data: dict, user_token: str) -> dict:
     """POST /rest/v1/trade_journal — 插入一条日志"""
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.post(
             _JOURNAL,
             json=data,
@@ -242,7 +245,7 @@ async def save_journal(data: dict, user_token: str) -> dict:
 
 async def list_journal(user_token: str) -> list[dict]:
     """GET /rest/v1/trade_journal — 按日期倒序返回当前用户所有日志"""
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.get(
             _JOURNAL,
             params={"order": "trade_date.desc,created_at.desc", "limit": "1000"},
@@ -255,7 +258,7 @@ async def list_journal(user_token: str) -> list[dict]:
 
 async def delete_journal(record_id: str, user_token: str) -> None:
     """DELETE /rest/v1/trade_journal?id=eq.<id> — RLS 保证只能删自己的记录"""
-    async with httpx.AsyncClient(proxies={}) as client:
+    async with httpx.AsyncClient() as client:
         resp = await client.delete(
             _JOURNAL,
             params={"id": f"eq.{record_id}"},
