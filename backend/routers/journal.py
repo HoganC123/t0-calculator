@@ -6,10 +6,6 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 
-def _set_proxy() -> None:
-    os.environ["http_proxy"]  = "http://127.0.0.1:7890"
-    os.environ["https_proxy"] = "http://127.0.0.1:7890"
-
 import httpx
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
@@ -69,7 +65,6 @@ async def api_list(
 @router.get("/stocks")
 async def api_stocks() -> Any:
     """返回A股全部股票代码和名称（公开数据，无需登录）"""
-    _set_proxy()
     import akshare as ak
     try:
         df = await asyncio.wait_for(
@@ -89,7 +84,6 @@ async def api_lhb(
     user: dict = Depends(require_auth),
 ) -> Any:
     """查询该股票近30天龙虎榜记录（最多5条）"""
-    _set_proxy()
     import akshare as ak
     end_date   = datetime.today().strftime("%Y%m%d")
     start_date = (datetime.today() - timedelta(days=30)).strftime("%Y%m%d")
