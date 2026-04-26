@@ -65,7 +65,7 @@ st.markdown(
 # ══════════════════════════════════════════════════════════════════════════════
 # 后端 API 调用
 # ══════════════════════════════════════════════════════════════════════════════
-_API     = st.secrets.get("BACKEND_URL", "http://localhost:8000")
+_API     = st.secrets.get("BACKEND_URL", "https://t0-calculator-production.up.railway.app")
 _TIMEOUT = 8   # 秒
 
 
