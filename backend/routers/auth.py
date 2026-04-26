@@ -53,6 +53,8 @@ async def login(body: AuthIn) -> Any:
         detail = "邮箱或密码错误" if code == 400 else str(e)
         raise HTTPException(status_code=code, detail=detail)
     except Exception as e:
+        import traceback
+        print(f"[DEBUG] Exception: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

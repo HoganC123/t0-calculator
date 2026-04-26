@@ -96,7 +96,8 @@ async def auth_sign_in(email: str, password: str) -> dict:
             headers={"apikey": _KEY, "Content-Type": "application/json"},
             timeout=10,
         )
-    print(f"[DEBUG] auth_sign_in: HTTP {resp.status_code}  body={resp.text[:300]}")
+    print(f"[DEBUG] Supabase response status: {resp.status_code}")
+    print(f"[DEBUG] Supabase response body: {resp.text}")
     _raise(resp)
     return resp.json()
 
