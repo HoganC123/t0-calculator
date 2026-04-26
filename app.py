@@ -68,7 +68,26 @@ st.markdown(
 _API     = st.secrets.get("BACKEND_URL", "http://localhost:8000")
 _TIMEOUT = 8   # 秒
 
-_ERR_CONN = "服务暂时不可用，请稍后重试"   # 统一连接失败提示
+
+def _ping_backend() -> None:
+    """后台异步 ping 后端根路径，让 Railway 从休眠中唤醒，不阻塞页面渲染。"""
+    import threading
+    def _do():
+        try:
+            import requests as _r
+            _r.get(f"{_API}/", timeout=15)
+        except Exception:
+            pass  # 网络异常静默忽略，不影响前端
+    threading.Thread(target=_do, daemon=True).start()
+
+
+# 保活：每次新会话（浏览器首次打开）异步 ping 后端，防止 Railway 冷启动超时
+# 用 session_state 标记，只在会话建立时触发一次，不随每次操作重复发送
+if "_backend_pinged" not in st.session_state:
+    st.session_state["_backend_pinged"] = True
+    _ping_backend()
+
+_ERR_CONN = "服务启动中，请等待10秒后重试"   # 统一连接失败提示（Railway 冷启动）
 
 
 def _unavailable(e: Exception) -> bool:
