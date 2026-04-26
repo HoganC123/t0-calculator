@@ -37,32 +37,111 @@ st.markdown(f"""
 <meta name="theme-color" content="#e63946">
 """, unsafe_allow_html=True)
 
-# ── 样式 ──────────────────────────────────────────────────────────────────────
+# ── 样式（金融科技极简风 v2）─────────────────────────────────────────────────
 st.markdown("""
 <style>
+/* ── 全局基础 ── */
+html, body, [class*="css"] {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                 "Helvetica Neue", Arial, sans-serif;
+    letter-spacing: 0.01em;
+}
+h1,h2,h3 { font-weight: 300 !important; letter-spacing: -0.02em; }
+
+/* ── 全局背景 ── */
+.stApp { background: #0a0a0a; }
+[data-testid="stSidebar"] > div:first-child { background: #0d0d0d; }
+
+/* ── 顶部工具栏隐藏多余元素 ── */
+#MainMenu, footer { visibility: hidden; }
+header[data-testid="stHeader"] { background: transparent; border-bottom: 1px solid #1a1a1a; }
+
+/* ── 指标颜色（A股：涨红跌绿）── */
 [data-testid="stMetricDelta"] > div[style*="color: rgb(9, 171, 59)"],
-[data-testid="stMetricDelta"] > div[style*="color: rgb(14, 203, 129)"] { color:#ff4b4b !important; }
+[data-testid="stMetricDelta"] > div[style*="color: rgb(14, 203, 129)"] { color:#ff3b30 !important; }
 [data-testid="stMetricDelta"] > div[style*="color: rgb(255, 43, 43)"],
-[data-testid="stMetricDelta"] > div[style*="color: rgb(255, 75, 75)"]  { color:#21c55d !important; }
+[data-testid="stMetricDelta"] > div[style*="color: rgb(255, 75, 75)"]  { color:#2ecc71 !important; }
+[data-testid="stMetricValue"] { font-weight: 300 !important; font-size: 1.6rem !important; }
+[data-testid="stMetricLabel"] { color: #666 !important; font-size: 0.78rem !important; }
 
-.pnl-card  { background:rgba(255,255,255,0.04); border-radius:8px; padding:12px 16px; margin-bottom:4px; }
-.pnl-label { font-size:0.82rem; color:rgba(250,250,250,0.55); margin:0 0 3px 0; }
-.pnl-value { font-size:1.55rem; font-weight:700; margin:0; }
-.pnl-red   { color:#ff4b4b; }
-.pnl-green { color:#21c55d; }
-.pnl-gray  { color:rgba(250,250,250,0.7); }
+/* ── 输入框 ── */
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input {
+    background: transparent !important;
+    border: none !important;
+    border-bottom: 1px solid #333 !important;
+    border-radius: 0 !important;
+    color: #f0f0f0 !important;
+    padding: 8px 2px !important;
+    font-size: 0.95rem !important;
+    transition: border-color 0.2s;
+}
+[data-testid="stTextInput"] input:focus,
+[data-testid="stNumberInput"] input:focus {
+    border-bottom-color: #ff3b30 !important;
+    box-shadow: none !important;
+    outline: none !important;
+}
 
-.be-box     { border:2px solid #ff4b4b; border-radius:8px; padding:14px 18px; margin:10px 0; }
-.be-box-buy { border:2px solid #21c55d; border-radius:8px; padding:14px 18px; margin:10px 0; }
-.be-title         { font-size:0.82rem; color:rgba(250,250,250,0.55); margin:0 0 3px 0; }
-.be-price-red     { font-size:1.8rem; font-weight:800; color:#ff4b4b; margin:0; }
-.be-price-green   { font-size:1.8rem; font-weight:800; color:#21c55d; margin:0; }
-.be-note          { font-size:0.78rem; color:rgba(250,250,250,0.45); margin:4px 0 0 0; }
+/* ── 按钮 ── */
+[data-testid="stButton"] > button {
+    border-radius: 4px !important;
+    font-weight: 400 !important;
+    font-size: 0.9rem !important;
+    letter-spacing: 0.05em !important;
+    transition: opacity 0.15s !important;
+}
+[data-testid="stButton"] > button[kind="primary"] {
+    background: #ff3b30 !important;
+    border: none !important;
+}
+[data-testid="stButton"] > button:hover { opacity: 0.85 !important; }
 
-.save-bar { background:rgba(255,255,255,0.03); border-radius:8px; padding:14px 16px; margin-top:12px; }
-.pct-hint  { font-size:0.78rem; margin:-6px 0 6px 0; }
+/* ── Tab ── */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0;
+    border-bottom: 1px solid #1e1e1e !important;
+    background: transparent;
+}
+.stTabs [data-baseweb="tab"] {
+    font-size: 0.85rem !important;
+    font-weight: 400 !important;
+    color: #666 !important;
+    padding: 10px 20px !important;
+    border-bottom: 2px solid transparent !important;
+    background: transparent !important;
+}
+.stTabs [aria-selected="true"] {
+    color: #f0f0f0 !important;
+    border-bottom-color: #ff3b30 !important;
+    background: transparent !important;
+}
 
-/* 侧边栏底部固定用户信息 */
+/* ── 卡片组件 ── */
+.pnl-card  {
+    background: #141414;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+}
+.pnl-label { font-size: 0.78rem; color: #666; margin: 0 0 6px 0; letter-spacing: 0.04em; text-transform: uppercase; }
+.pnl-value { font-size: 1.5rem; font-weight: 300; margin: 0; }
+.pnl-red   { color: #ff3b30; }
+.pnl-green { color: #2ecc71; }
+.pnl-gray  { color: #888; }
+
+.be-box     { border: 1px solid #ff3b30; border-radius: 8px; padding: 16px 20px; margin: 12px 0; background: rgba(255,59,48,0.04); }
+.be-box-buy { border: 1px solid #2ecc71; border-radius: 8px; padding: 16px 20px; margin: 12px 0; background: rgba(46,204,113,0.04); }
+.be-title       { font-size: 0.75rem; color: #666; margin: 0 0 6px 0; letter-spacing: 0.05em; text-transform: uppercase; }
+.be-price-red   { font-size: 1.9rem; font-weight: 300; color: #ff3b30; margin: 0; }
+.be-price-green { font-size: 1.9rem; font-weight: 300; color: #2ecc71; margin: 0; }
+.be-note        { font-size: 0.78rem; color: #555; margin: 6px 0 0 0; }
+
+.save-bar { background: #141414; border: 1px solid #222; border-radius: 8px; padding: 16px 20px; margin-top: 16px; }
+.pct-hint { font-size: 0.78rem; color: #666; margin: -4px 0 8px 0; }
+
+/* ── 侧边栏底部固定用户信息 ── */
 [data-testid="stSidebarContent"] {
     display: flex;
     flex-direction: column;
@@ -71,25 +150,59 @@ st.markdown("""
 }
 .sidebar-scroll { flex: 1 1 auto; overflow-y: auto; padding-bottom: 0.5rem; }
 .sidebar-bottom {
-    border-top: 1px solid rgba(255,255,255,0.08);
-    padding: 12px 0 4px 0;
-    background: #1a1d27;
+    border-top: 1px solid #1e1e1e;
+    padding: 14px 0 6px 0;
+    background: #0d0d0d;
 }
 
+/* ── select / slider ── */
+[data-testid="stSelectbox"] > div > div {
+    background: #141414 !important;
+    border: 1px solid #222 !important;
+    border-radius: 4px !important;
+}
+
+/* ── 数据表格 ── */
+[data-testid="stDataFrame"] { border: 1px solid #1e1e1e; border-radius: 8px; overflow: hidden; }
+
+/* ── 分割线 ── */
+hr { border-color: #1e1e1e !important; }
+
+/* ── 登录页居中卡片 ── */
+.auth-card {
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 40px 36px;
+    margin-top: 24px;
+}
+.auth-logo {
+    font-size: 1.4rem;
+    font-weight: 300;
+    color: #f0f0f0;
+    margin-bottom: 4px;
+}
+.auth-sub {
+    font-size: 0.82rem;
+    color: #555;
+    margin-bottom: 32px;
+}
+
+/* ── 响应式 ── */
 @media (max-width:640px) {
     [data-testid="column"] { min-width:100% !important; flex:1 1 100% !important; }
-    .stTabs [data-baseweb="tab"] { font-size:13px !important; padding:6px 10px !important; }
-    [data-testid="stMetricValue"] { font-size:1.3rem !important; }
-    .pnl-value { font-size:1.25rem !important; }
+    .stTabs [data-baseweb="tab"] { font-size:12px !important; padding:8px 12px !important; }
+    [data-testid="stMetricValue"] { font-size:1.2rem !important; }
+    .pnl-value { font-size:1.2rem !important; }
     .be-price-red, .be-price-green { font-size:1.4rem !important; }
-    h1 { font-size:1.35rem !important; }
+    h1 { font-size:1.3rem !important; }
 }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown(
-    '<h1 style="margin-bottom:0">筹码本</h1>'
-    '<p style="color:rgba(250,250,250,0.45);font-size:0.9rem;margin-top:2px">A股散户决策工具</p>',
+    '<h1 style="margin-bottom:0;font-weight:300;letter-spacing:-0.03em">筹码本</h1>'
+    '<p style="color:#555;font-size:0.85rem;margin-top:4px;letter-spacing:0.02em">A 股散户决策工具</p>',
     unsafe_allow_html=True)
 
 
@@ -1602,10 +1715,15 @@ def api_logout() -> None:
 
 def _show_auth_page() -> None:
     """未登录时显示的登录 / 注册表单（居中卡片）"""
-    st.markdown("<br>", unsafe_allow_html=True)
-    _, card, _ = st.columns([1, 1.6, 1])
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    _, card, _ = st.columns([1, 1.4, 1])
     with card:
-        tab_in, tab_up = st.tabs(["🔑  登录", "📝  注册"])
+        st.markdown(
+            '<p class="auth-logo">筹码本</p>'
+            '<p class="auth-sub">A 股散户决策工具</p>',
+            unsafe_allow_html=True,
+        )
+        tab_in, tab_up = st.tabs(["登录", "注册"])
 
         # ── 登录 Tab ──
         with tab_in:
