@@ -1,3 +1,7 @@
+import os
+for _k in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'all_proxy']:
+    os.environ.pop(_k, None)
+
 import streamlit as st
 import requests as _req
 from datetime import date
